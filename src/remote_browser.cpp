@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 #include <iostream>
+#include <algorithm>
 
 #include "miglib/migtk.h"
 #include "miglib/migtkconn.h"
@@ -44,14 +45,14 @@ private:
 LircClient::LircClient(ILircClient *cli)
     :m_fd(-1), m_cfg(NULL), m_cli(cli)
 {
-    m_fd = lirc_init("mplayer", 1);
+    m_fd = lirc_init("remote_browser", 1);
 
     m_io.Reset( g_io_channel_unix_new(m_fd) );
     g_io_channel_set_raw_nonblock(m_io, NULL);
 
     MIGLIB_IO_ADD_WATCH(m_io, G_IO_IN, LircClient, OnIo, this);
 
-    lirc_readconfig(NULL, &m_cfg, NULL);
+    lirc_readconfig("remote_browser.lirc", &m_cfg, NULL);
 }
 
 LircClient::~LircClient()
@@ -66,7 +67,7 @@ gboolean LircClient::OnIo(GIOChannel *io, GIOCondition cond)
     char *code, *cmd;
     while (lirc_nextcode(&code) == 0 && code != NULL)
     {
-        std::cout << "Code: " << code << std::endl;
+        //std::cout << "Code: " << code << std::endl;
         while (lirc_code2char(m_cfg, code, &cmd) == 0 && cmd != NULL)
         {
             m_cli->OnLircCommand(cmd);
@@ -74,74 +75,6 @@ gboolean LircClient::OnIo(GIOChannel *io, GIOCondition cond)
 	free(code);
     }
     return TRUE;
-}
-
-struct DirEntry
-{
-    std::string name;
-    bool isDir;
-    DirEntry(const std::string &n, bool d)
-        :name(n), isDir(d)
-    {}
-    bool operator < (const DirEntry &o) const
-    {
-        if (isDir && !o.isDir)
-            return true;
-        if (!isDir && o.isDir)
-            return false;
-        return name < o.name;
-    }
-};
-
-void list_dir(const std::string &path, std::vector<DirEntry> &files)
-{
-    files.clear();
-    if (path != "/")
-        files.push_back(DirEntry("..", true));
-
-    DIR *dir = opendir(path.c_str());
-    if (!dir)
-        return;
-
-    while (dirent *entry = readdir(dir))
-    {
-        enum { T_Other, T_Dir, T_File } type = T_Other;
-#ifdef _DIRENT_HAVE_D_TYPE
-        if (entry->d_type != DT_UNKNOWN)
-        {
-            type = entry->d_type == DT_DIR? T_Dir : 
-                   entry->d_type == DT_REG? T_File : 
-                   T_Other;
-        }
-        else
-#endif
-        {
-            struct stat st;
-            if (stat((path + "/" + entry->d_name).c_str(), &st) == 0)
-            {
-                type = S_ISDIR(st.st_mode)? T_Dir : 
-                       S_ISREG(st.st_mode)? T_File : 
-                       T_Other;
-            }
-        }
-
-        const std::string name = entry->d_name;
-        if (name.empty())
-            continue;
-        if (name[0] == '.')
-            continue; //hidden?
-        if (name == "." || name == "..")
-            continue;
-
-        if (type == T_Dir)
-            files.push_back(DirEntry(name, true));
-        else if (type == T_File)
-            files.push_back(DirEntry(name, false));
-    }
-
-    closedir(dir);
-
-    std::sort(files.begin(), files.end());
 }
 
 class RegEx
@@ -199,6 +132,94 @@ FileAssoc *MatchFile(const std::string &file)
     return NULL;
 }
 
+
+struct DirEntry
+{
+    std::string name;
+    bool isDir;
+    DirEntry(const std::string &n, bool d)
+        :name(n), isDir(d)
+    {}
+    bool operator < (const DirEntry &o) const
+    {
+        if (isDir && !o.isDir)
+            return true;
+        if (!isDir && o.isDir)
+            return false;
+        bool p1 = name == "..", p2 = o.name == "..";
+        if (p1 && !p2)
+            return true;
+        if (!p1 && p2)
+            return false;
+        return name < o.name;
+    }
+};
+
+void list_dir(const std::string &path, std::vector<DirEntry> &files)
+{
+    files.clear();
+    if (path != "/")
+        files.push_back(DirEntry("..", true));
+
+    DIR *dir = opendir(path.c_str());
+    if (!dir)
+        return;
+
+    while (dirent *entry = readdir(dir))
+    {
+        enum { T_Other, T_Dir, T_File } type = T_Other;
+#ifdef _DIRENT_HAVE_D_TYPE
+        if (entry->d_type != DT_UNKNOWN)
+        {
+            type = entry->d_type == DT_DIR? T_Dir : 
+                   entry->d_type == DT_REG? T_File : 
+                   T_Other;
+        }
+        else
+#endif
+        {
+            struct stat st;
+            if (stat((path + "/" + entry->d_name).c_str(), &st) == 0)
+            {
+                type = S_ISDIR(st.st_mode)? T_Dir : 
+                       S_ISREG(st.st_mode)? T_File : 
+                       T_Other;
+            }
+        }
+
+        const std::string name = entry->d_name;
+        if (name.empty())
+            continue;
+        //if (name[0] == '.')
+        //    continue; //hidden?
+        if (name == "." || name == "..")
+            continue;
+
+        if (type == T_Dir)
+        {
+            if (name[0] == '.')
+                continue; //hidden folder
+            files.push_back(DirEntry(name, true));
+        }
+        else if (type == T_File)
+        {
+            if (MatchFile(name))
+                files.push_back(DirEntry(name, false));
+        }
+    }
+
+    closedir(dir);
+
+    std::sort(files.begin(), files.end());
+}
+
+struct Favorite
+{
+    int id;
+    std::string name, path;
+};
+std::vector<Favorite> g_favorites;
+
 class MainWnd : private ILircClient
 {
 public:
@@ -213,6 +234,7 @@ private:
     std::vector<DirEntry> m_files;
     GPid m_childPid;
     std::string m_childText;
+    int m_favoriteIdx;
 
     void OnDestroy(GtkObject *w)
     {
@@ -221,8 +243,10 @@ private:
     gboolean OnDrawExpose(GtkWidget *w, GdkEventExpose *e);
     gboolean OnDrawKey(GtkWidget *w, GdkEventKey *e);
     void Move(bool down);
-    void Select();
-    void ChangePath(const std::string &path);
+    void Select(bool onlyDir);
+    void Back();
+    void ChangePath(const std::string &path, bool findFav = true);
+    bool ChangeFavorite(int nfav);
     void Open(const std::string &path);
     void OnChildWatch(GPid pid, gint status);
 
@@ -234,7 +258,7 @@ private:
 
 
 MainWnd::MainWnd()
-    :m_lirc(this), m_childPid(0)
+    :m_lirc(this), m_childPid(0), m_favoriteIdx(-1)
 {
     m_wnd.Reset( gtk_window_new(GTK_WINDOW_TOPLEVEL) );
     MIGTK_OBJECT_destroy(m_wnd, MainWnd, OnDestroy, this);
@@ -247,10 +271,11 @@ MainWnd::MainWnd()
     gtk_widget_modify_bg(m_draw, GTK_STATE_NORMAL, &black);
     gtk_container_add(m_wnd, m_draw);
 
-    //gtk_window_fullscreen(m_wnd);
+    gtk_window_fullscreen(m_wnd);
     gtk_widget_show_all(m_wnd);
 
-    ChangePath("/home/rodrigo");
+    if (!ChangeFavorite(1))
+        ChangePath(".");
 }
 
 gboolean MainWnd::OnDrawKey(GtkWidget *w, GdkEventKey *e)
@@ -270,10 +295,50 @@ gboolean MainWnd::OnDrawKey(GtkWidget *w, GdkEventKey *e)
         break;
     case GDK_KEY_Return:
     case GDK_KEY_KP_Enter:
-        Select();
+        Select(false);
+        break;
+    case GDK_KEY_1: 
+    case GDK_KEY_KP_1: 
+        ChangeFavorite(1); 
+        break;
+    case GDK_KEY_2: 
+    case GDK_KEY_KP_2: 
+        ChangeFavorite(2); 
+        break;
+    case GDK_KEY_3: 
+    case GDK_KEY_KP_3: 
+        ChangeFavorite(3); 
+        break;
+    case GDK_KEY_4: 
+    case GDK_KEY_KP_4: 
+        ChangeFavorite(4); 
+        break;
+    case GDK_KEY_5: 
+    case GDK_KEY_KP_5: 
+        ChangeFavorite(5); 
+        break;
+    case GDK_KEY_6: 
+    case GDK_KEY_KP_6: 
+        ChangeFavorite(6); 
+        break;
+    case GDK_KEY_7: 
+    case GDK_KEY_KP_7: 
+        ChangeFavorite(7); 
+        break;
+    case GDK_KEY_8: 
+    case GDK_KEY_KP_8: 
+        ChangeFavorite(8); 
+        break;
+    case GDK_KEY_9: 
+    case GDK_KEY_KP_9: 
+        ChangeFavorite(9); 
+        break;
+    case GDK_KEY_0: 
+    case GDK_KEY_KP_0: 
+        ChangeFavorite(10); 
         break;
     default:
-        std::cout << "Key: " << std::hex << e->keyval << std::dec << std::endl;
+        //std::cout << "Key: " << std::hex << e->keyval << std::dec << std::endl;
         break;
     }
     return TRUE;
@@ -296,7 +361,7 @@ void MainWnd::Move(bool down)
     Redraw();
 }
 
-void MainWnd::Select()
+void MainWnd::Select(bool onlyDir)
 {
     if (m_lineSel < 0 || m_lineSel >= static_cast<int>(m_files.size()))
         return;
@@ -305,24 +370,31 @@ void MainWnd::Select()
     {
         if (entry.name == "..")
         {
-            size_t slash = m_cwd.rfind('/');
-            if (slash != std::string::npos)
-                ChangePath(m_cwd.substr(0, slash));
-            else
-                ChangePath("/");
+            Back();
         }
         else
         {
+            if (m_cwd == "/")
+                m_cwd.clear(); //to avoid the double /
             ChangePath(m_cwd + "/" + entry.name);
         }
     }
-    else
+    else if (!onlyDir)
     {
         Open(entry.name);
     }
 }
 
-void MainWnd::ChangePath(const std::string &path)
+void MainWnd::Back()
+{
+    size_t slash = m_cwd.rfind('/');
+    if (slash != std::string::npos)
+        ChangePath(m_cwd.substr(0, slash));
+    else
+        ChangePath("/");
+}
+
+void MainWnd::ChangePath(const std::string &path, bool findFav /*=true*/)
 {
     m_cwd = path;
     if (m_cwd.empty())
@@ -333,22 +405,53 @@ void MainWnd::ChangePath(const std::string &path)
 
     list_dir(m_cwd, m_files);
     m_lineSel = m_firstLine = 0;
+
+    if (findFav)
+    {
+        m_favoriteIdx = -1;
+        for (size_t i = 0; i < g_favorites.size(); ++i)
+        {
+            if (g_favorites[i].path == path.substr(0, g_favorites[i].path.size()))
+            {
+                m_favoriteIdx = i;
+                break;
+            }
+        }
+    }
     Redraw();
+}
+
+bool MainWnd::ChangeFavorite(int nfav)
+{
+    size_t i;
+    for (i = 0; i < g_favorites.size(); ++i)
+    {
+        if (g_favorites[i].id == nfav)
+            break;
+    }
+    if (i == g_favorites.size())
+        return false;
+
+    Favorite &fav = g_favorites[i];
+
+    m_favoriteIdx = i;
+    ChangePath(fav.path, false);
+    return true;
 }
 
 void MainWnd::Open(const std::string &path)
 {
     std::string fullPath = m_cwd + "/" + path;
-    std::cout << "Run " << fullPath << std::endl;
+    //std::cout << "Run " << fullPath << std::endl;
 
     FileAssoc *assoc = MatchFile(path);
     if (!assoc)
     {
-        std::cout << "No assoc!"<< std::endl;
+        //std::cout << "No assoc!"<< std::endl;
         return;
     }
 
-    std::cout << "Assoc: "<< assoc->cmd << std::endl;
+    //std::cout << "Assoc: "<< assoc->cmd << std::endl;
 
     std::vector<const char *> args;
     args.push_back(assoc->cmd.c_str());
@@ -361,16 +464,19 @@ void MainWnd::Open(const std::string &path)
             args.push_back(arg.c_str());
     }
     args.push_back(NULL);
-    if (g_spawn_async(NULL, const_cast<char**>(args.data()), NULL, GSpawnFlags(G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD), NULL, NULL, &m_childPid, NULL))
+    if (gdk_spawn_on_screen(gdk_screen_get_default(), NULL, const_cast<char**>(args.data()), NULL, 
+                GSpawnFlags(G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD), 
+                NULL, NULL, &m_childPid, NULL))
     {
         MIGLIB_CHILD_WATCH_ADD(m_childPid, MainWnd, OnChildWatch, this);
         m_childText = path;
+        Redraw();
     }
 }
 
 void MainWnd::OnChildWatch(GPid pid, gint status)
 {
-    std::cout << "Finish " << pid << ": " << status << std::endl;
+    //std::cout << "Finish " << pid << ": " << status << std::endl;
     if (m_childPid == pid)
     {
         m_childPid = 0;
@@ -388,16 +494,20 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
     //std::cout << "Draw " << size.width << " - " << size.height << std::endl;
 
     CairoPtr cr(gdk_cairo_create(w->window));
+    cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+    cairo_set_line_width(cr, 2);
+
     PangoLayoutPtr layout(pango_cairo_create_layout(cr));
     pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_MIDDLE);
 
     PangoFontDescriptionPtr font(pango_font_description_new());
     pango_font_description_set_family(font, "Ubuntu");
-    pango_font_description_set_size(font, 12 * PANGO_SCALE);
+    pango_font_description_set_size(font, 24 * PANGO_SCALE);
 
     PangoFontDescriptionPtr fontTitle(pango_font_description_new());
     pango_font_description_set_family(fontTitle, "Ubuntu");
-    pango_font_description_set_size(fontTitle, 24 * PANGO_SCALE);
+    pango_font_description_set_size(fontTitle, 40 * PANGO_SCALE);
+    pango_font_description_set_weight(fontTitle, PANGO_WEIGHT_BOLD);
     
     pango_layout_set_text(layout, "M", 1);
     PangoRectangle baseRect;
@@ -410,8 +520,8 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
     pango_layout_get_extents(layout, NULL, &baseRect);
     double lineH = double(baseRect.height) / PANGO_SCALE;
 
-    double marginX1 = 50, marginX2 = 50;
-    double marginY1 = 50, marginY2 = 50;
+    double marginX1 = 10, marginX2 = 10;
+    double marginY1 = titleH + 10, marginY2 = 10;
     double scrollW = 15;
 
     double szH = size.height - (marginY1 + marginY2), szW = size.width - (marginX1 + marginX2 + scrollW);
@@ -425,8 +535,7 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
     cairo_matrix_t matrix;
     cairo_get_matrix(cr, &matrix);
 
-    const double DELTA_X = 20;
-    pango_layout_set_width(layout, (szW - DELTA_X) * PANGO_SCALE);
+    const double DELTA_X = 32;
     pango_layout_set_height(layout, 0);
 
     if (m_lineSel < m_firstLine)
@@ -466,9 +575,34 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
             cairo_fill(cr);
             cairo_set_source_rgb(cr, 0, 0, 0);
         }
-        cairo_translate(cr, DELTA_X, 0);
+        if (entry.isDir)
+        {
+            pango_layout_set_width(layout, (szW - DELTA_X) * PANGO_SCALE);
+            //a small ugly folder
+            cairo_move_to(cr, 6, (lineH - 18) / 2);
+            cairo_set_line_width(cr, 4);
+            cairo_rel_line_to(cr, 0, 18);
+            cairo_rel_line_to(cr, 22, 0);
+            cairo_rel_line_to(cr, 0, -14);
+            cairo_rel_line_to(cr, -10, 0);
+            cairo_rel_line_to(cr, -6, -4);
+            cairo_close_path(cr);
+            //cairo_rectangle(cr, 4, (lineH - 24) / 2, 24, 24);
+            cairo_fill_preserve(cr);
+            cairo_stroke(cr);
+            cairo_set_line_width(cr, 2);
+            cairo_translate(cr, DELTA_X, 0);
+        }
+        else
+        {
+            pango_layout_set_width(layout, szW * PANGO_SCALE);
+            cairo_translate(cr, DELTA_X / 4, 0);
+        }
         pango_cairo_show_layout(cr, layout);
-        cairo_translate(cr, -DELTA_X, 0);
+        if (entry.isDir)
+            cairo_translate(cr, -DELTA_X, 0);
+        else
+            cairo_translate(cr, -DELTA_X / 4, 0);
         if (static_cast<int>(nLine) == m_lineSel)
             cairo_set_source_rgb(cr, 1, 1, 1);
 
@@ -478,7 +612,23 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
     pango_layout_set_font_description(layout, fontTitle);
     pango_layout_set_width(layout, (szW + scrollW) * PANGO_SCALE);
 
-    pango_layout_set_text(layout, m_cwd.data(), m_cwd.size());
+    std::string title;
+    if (m_favoriteIdx >= 0 && m_favoriteIdx < static_cast<int>(g_favorites.size()))
+    {
+        const Favorite &fav = g_favorites[m_favoriteIdx];
+        if (m_cwd.size() >= fav.path.size())
+        {
+            title = fav.name + ": " + m_cwd.substr(fav.path.size());
+            if (m_cwd.size() == fav.path.size())
+                title += "/";
+        }
+        else
+            title = m_cwd;
+    }
+    else
+        title = m_cwd;
+    pango_layout_set_text(layout, title.data(), title.size());
+
     cairo_set_matrix(cr, &matrix);
     cairo_translate(cr, 0, -titleH - 4);
     pango_cairo_show_layout(cr, layout);
@@ -525,15 +675,54 @@ void MainWnd::Redraw()
 
 void MainWnd::OnLircCommand(const char *cmd)
 {
-    std::cout << "Cmd: " << cmd << std::endl;
+    if (m_childPid != 0)
+        return;
+
+    if (strcmp(cmd, "up") == 0)
+        Move(false);
+    else if (strcmp(cmd, "down") == 0)
+        Move(true);
+    else if (strcmp(cmd, "ok") == 0)
+        Select(false);
+    else if (strcmp(cmd, "right") == 0)
+        Select(true);
+    else if (strcmp(cmd, "left") == 0)
+        Back();
+    else if (strlen(cmd) > 4 && memcmp(cmd, "fav ", 4) == 0)
+    {
+        int nfav = atoi(cmd + 4);
+        ChangeFavorite(nfav);
+    }
+    else
+        std::cout << "Unknown cmd: " << cmd << std::endl;
 }
 
 int main(int argc, char **argv)
 {
     TiXmlDocument xml;
-    if (xml.LoadFile("remote_browser.rc"))
+    if (xml.LoadFile("remote_browser.xml"))
     {
-        TiXmlElement *assoc = xml.FirstChildElement("file_assoc");
+        TiXmlElement *config = xml.FirstChildElement("config"); 
+        TiXmlElement *favorites = config->FirstChildElement("favorites");
+        if (favorites)
+        {
+            for (TiXmlElement *fav = favorites->FirstChildElement("favorite"); fav; fav = fav->NextSiblingElement("favorite"))
+            {
+                const char *id = fav->Attribute("id");
+                const char *name = fav->Attribute("name");
+                const char *path = fav->Attribute("path");
+                if (!id || !name || !path)
+                    continue;
+                Favorite f;
+                f.id = atoi(id);
+                if (f.id == 0)
+                    continue;
+                f.name = name;
+                f.path = path;
+                g_favorites.push_back(f);
+            }
+        }
+        TiXmlElement *assoc = config->FirstChildElement("file_assoc");
         if (assoc)
         {
             for (TiXmlElement *pat = assoc->FirstChildElement("pattern"); pat; pat = pat->NextSiblingElement("pattern"))
@@ -570,17 +759,15 @@ int main(int argc, char **argv)
             }
         }
     }
-/*
-    RegEx re("\\.txt$", REG_EXTENDED | REG_ICASE | REG_NOSUB);
-    int r = regexec(re, argv[1], 0, NULL, 0);
-    std::cout << "regexec " << r << std::endl;
-    return 0;
-*/
+
     gtk_init(&argc, &argv);
 
     MainWnd mainWnd;
 
     gtk_main();
+
+    for (size_t i = 0; i < g_assocs.size(); ++i)
+        delete g_assocs[i];
 
     return 0;
 }

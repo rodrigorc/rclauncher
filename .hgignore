@@ -1,9 +1,10 @@
-Makefile.in$
-^aclocal.m4$
-^autom4te.cache
+Makefile\.in$
+^aclocal\.m4$
+^autom4te\.cache
 ^auxdir
 ^debug
 ^release
 ^configure$
 ^util$
-^config.h.in$
+^config\.h\.in$
+\.swp$
