@@ -8,6 +8,7 @@
 #include <dirent.h>
 
 #include <regex.h>
+#include <wordexp.h>
 
 #include <string>
 #include <vector>
@@ -110,7 +111,6 @@ void RegEx::Throw(int res, const std::string &txt)
 struct FileAssoc
 {
     RegEx regex;
-    std::string cmd;
     std::vector<std::string> args;
 
     FileAssoc(const char *re, int cflags)
@@ -293,6 +293,14 @@ gboolean MainWnd::OnDrawKey(GtkWidget *w, GdkEventKey *e)
     case GDK_KEY_KP_Down:
         Move(true);
         break;
+    case GDK_KEY_Left:
+    case GDK_KEY_KP_Left:
+        Back();
+        break;
+    case GDK_KEY_Right:
+    case GDK_KEY_KP_Right:
+        Select(true);
+        break;
     case GDK_KEY_Return:
     case GDK_KEY_KP_Enter:
         Select(false);
@@ -389,7 +397,18 @@ void MainWnd::Back()
 {
     size_t slash = m_cwd.rfind('/');
     if (slash != std::string::npos)
+    {
+        std::string leaf = m_cwd.substr(slash + 1);
         ChangePath(m_cwd.substr(0, slash));
+        for (size_t i = 0; i < m_files.size(); ++i)
+        {
+            if (m_files[i].name == leaf)
+            {
+                m_lineSel = i;
+                break;
+            }
+        }
+    }
     else
         ChangePath("/");
 }
@@ -451,10 +470,9 @@ void MainWnd::Open(const std::string &path)
         return;
     }
 
-    //std::cout << "Assoc: "<< assoc->cmd << std::endl;
+    //std::cout << "Assoc: "<< assoc->args[0] << std::endl;
 
     std::vector<const char *> args;
-    args.push_back(assoc->cmd.c_str());
     for (size_t i = 0; i < assoc->args.size(); ++i)
     {
         const std::string &arg = assoc->args[i];
@@ -520,9 +538,9 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
     pango_layout_get_extents(layout, NULL, &baseRect);
     double lineH = double(baseRect.height) / PANGO_SCALE;
 
-    double marginX1 = 10, marginX2 = 10;
-    double marginY1 = titleH + 10, marginY2 = 10;
-    double scrollW = 15;
+    double marginX1 = 20, marginX2 = 20;
+    double marginY1 = titleH + 10, marginY2 = 20;
+    double scrollW = 20;
 
     double szH = size.height - (marginY1 + marginY2), szW = size.width - (marginX1 + marginX2 + scrollW);
     int nLines = int(szH / lineH);
@@ -547,12 +565,14 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
     {
         double thumbY = m_firstLine * szH / m_files.size();
         double thumbH = nLines * szH / m_files.size();
+        cairo_set_source_rgb(cr, 0.75, 0.75, 0.75);
         cairo_rectangle(cr, szW, thumbY, scrollW, thumbH);
         cairo_fill(cr);
+        cairo_set_source_rgb(cr, 1, 1, 1);
     }
     else
     {
-        cairo_set_source_rgb(cr, 0.5, 0.5, 0.5);
+        cairo_set_source_rgb(cr, 0.2, 0.2, 0.2);
         cairo_rectangle(cr, szW, 0, scrollW, szH);
         cairo_fill(cr);
         cairo_set_source_rgb(cr, 1, 1, 1);
@@ -595,7 +615,7 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
         }
         else
         {
-            pango_layout_set_width(layout, szW * PANGO_SCALE);
+            pango_layout_set_width(layout, (szW - DELTA_X / 4)* PANGO_SCALE);
             cairo_translate(cr, DELTA_X / 4, 0);
         }
         pango_cairo_show_layout(cr, layout);
@@ -637,11 +657,11 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
     //*******************************
     if (m_childPid != 0)
     {
+        double marginChildW = 25, marginChildH = 25;
         pango_layout_set_text(layout, m_childText.data(), m_childText.size());
-        pango_layout_set_width(layout, -1);
+        /*pango_layout_set_width(layout, -1);
         pango_layout_get_extents(layout, NULL, &baseRect);
 
-        double marginChildW = 25, marginChildH = 25;
         double childH = double(baseRect.height) / PANGO_SCALE + 2 * marginChildH;
         double childW = double(baseRect.width) / PANGO_SCALE + 2 * marginChildW;
         if (childW > size.width)
@@ -653,9 +673,22 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
         }
 
         pango_layout_set_width(layout, childW * PANGO_SCALE);
+        */
+        pango_layout_set_width(layout, size.width * PANGO_SCALE);
+        pango_layout_set_height(layout, -1);
+        pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_NONE);
+        pango_layout_set_wrap(layout, PANGO_WRAP_WORD_CHAR);
+        pango_layout_get_extents(layout, NULL, &baseRect);
+        double childH = double(baseRect.height) / PANGO_SCALE + 2 * marginChildH;
+        double childW = double(baseRect.width) / PANGO_SCALE + 2 * marginChildW;
+        if (childW > size.width)
+        {
+            childW = size.width;
+            pango_layout_set_width(layout, (childW - 2 * marginChildW) * PANGO_SCALE);
+        }
 
         cairo_set_matrix(cr, &matrix);
-        cairo_translate(cr, (szW + scrollW - childW) / 2, (szH - childH) / 2);
+        cairo_translate(cr, (size.width - childW) / 2 - marginX1, (size.height - childH) / 2 - marginY1);
         cairo_rectangle(cr, 0, 0, childW, childH);
         cairo_set_source_rgb(cr, 0, 0, 0);
         cairo_fill_preserve(cr);
@@ -731,23 +764,26 @@ int main(int argc, char **argv)
                 try
                 {
                     const char *match = pat->Attribute("match");
-                    const char *cmd = pat->Attribute("command");
-                    if (!match || !cmd)
+                    const char *args = pat->Attribute("command");
+                    if (!match)
                         continue;
 
                     assoc = new FileAssoc(match, REG_EXTENDED | REG_ICASE | REG_NOSUB);
-                    assoc->cmd = cmd;
                     bool isFileArg = false;
-                    for (TiXmlElement *arg = pat->FirstChildElement("arg"); arg; arg = arg->NextSiblingElement("arg"))
+                    if (args)
                     {
-                        TiXmlText *targ = arg->FirstChild()->ToText();
-                        if (!targ)
-                            continue;
-                        const char *txt = targ->Value();
-                        assoc->args.push_back(txt);
-                        if (assoc->args.back().find("$1") != std::string::npos)
-                            isFileArg = true;
+                        wordexp_t words;
+                        wordexp(args, &words, 0);
+                        for (size_t i = 0; i < words.we_wordc; ++i)
+                        {
+                            const char *txt = words.we_wordv[i];
+                            assoc->args.push_back(txt);
+                            if (assoc->args.back().find("$1") != std::string::npos)
+                                isFileArg = true;
+                        }
+                        wordfree(&words);
                     }
+
                     if (!isFileArg)
                         assoc->args.push_back("$1");
                     g_assocs.push_back(assoc);
