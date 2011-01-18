@@ -68,7 +68,7 @@ gboolean LircClient::OnIo(GIOChannel *io, GIOCondition cond)
     char *code, *cmd;
     while (lirc_nextcode(&code) == 0 && code != NULL)
     {
-        //std::cout << "Code: " << code << std::endl;
+        std::cout << "Code: " << code << std::endl;
         while (lirc_code2char(m_cfg, code, &cmd) == 0 && cmd != NULL)
         {
             m_cli->OnLircCommand(cmd);
@@ -112,9 +112,10 @@ struct FileAssoc
 {
     RegEx regex;
     std::vector<std::string> args;
+    bool isKillable;
 
     FileAssoc(const char *re, int cflags)
-        :regex(re, cflags)
+        :regex(re, cflags), isKillable(false)
     {
     }
 };
@@ -234,6 +235,7 @@ private:
     std::vector<DirEntry> m_files;
     GPid m_childPid;
     std::string m_childText;
+    bool m_isKillable;
     int m_favoriteIdx;
 
     void OnDestroy(GtkObject *w)
@@ -258,7 +260,7 @@ private:
 
 
 MainWnd::MainWnd()
-    :m_lirc(this), m_childPid(0), m_favoriteIdx(-1)
+    :m_lirc(this), m_childPid(0), m_isKillable(false), m_favoriteIdx(-1)
 {
     m_wnd.Reset( gtk_window_new(GTK_WINDOW_TOPLEVEL) );
     MIGTK_OBJECT_destroy(m_wnd, MainWnd, OnDestroy, this);
@@ -469,7 +471,6 @@ void MainWnd::Open(const std::string &path)
         //std::cout << "No assoc!"<< std::endl;
         return;
     }
-
     //std::cout << "Assoc: "<< assoc->args[0] << std::endl;
 
     std::vector<const char *> args;
@@ -488,6 +489,7 @@ void MainWnd::Open(const std::string &path)
     {
         MIGLIB_CHILD_WATCH_ADD(m_childPid, MainWnd, OnChildWatch, this);
         m_childText = path;
+        m_isKillable = assoc->isKillable;
         Redraw();
     }
 }
@@ -659,33 +661,14 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
     {
         double marginChildW = 25, marginChildH = 25;
         pango_layout_set_text(layout, m_childText.data(), m_childText.size());
-        /*pango_layout_set_width(layout, -1);
-        pango_layout_get_extents(layout, NULL, &baseRect);
 
-        double childH = double(baseRect.height) / PANGO_SCALE + 2 * marginChildH;
-        double childW = double(baseRect.width) / PANGO_SCALE + 2 * marginChildW;
-        if (childW > size.width)
-        {
-            marginChildW = (size.width - childW + 2 * marginChildW) / 2;
-            if (marginChildW < 0)
-                marginChildW = 0;
-            childW = size.width;
-        }
-
-        pango_layout_set_width(layout, childW * PANGO_SCALE);
-        */
-        pango_layout_set_width(layout, size.width * PANGO_SCALE);
+        pango_layout_set_width(layout, (size.width - 2 * marginChildW) * PANGO_SCALE);
         pango_layout_set_height(layout, -1);
         pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_NONE);
         pango_layout_set_wrap(layout, PANGO_WRAP_WORD_CHAR);
         pango_layout_get_extents(layout, NULL, &baseRect);
         double childH = double(baseRect.height) / PANGO_SCALE + 2 * marginChildH;
         double childW = double(baseRect.width) / PANGO_SCALE + 2 * marginChildW;
-        if (childW > size.width)
-        {
-            childW = size.width;
-            pango_layout_set_width(layout, (childW - 2 * marginChildW) * PANGO_SCALE);
-        }
 
         cairo_set_matrix(cr, &matrix);
         cairo_translate(cr, (size.width - childW) / 2 - marginX1, (size.height - childH) / 2 - marginY1);
@@ -709,7 +692,11 @@ void MainWnd::Redraw()
 void MainWnd::OnLircCommand(const char *cmd)
 {
     if (m_childPid != 0)
+    {
+        if (m_isKillable && strcmp(cmd, "kill") == 0)
+            kill(m_childPid, SIGTERM);
         return;
+    }
 
     if (strcmp(cmd, "up") == 0)
         Move(false);
@@ -765,10 +752,14 @@ int main(int argc, char **argv)
                 {
                     const char *match = pat->Attribute("match");
                     const char *args = pat->Attribute("command");
+                    const char *killable = pat->Attribute("killable");
                     if (!match)
                         continue;
 
                     assoc = new FileAssoc(match, REG_EXTENDED | REG_ICASE | REG_NOSUB);
+                    if (killable && (atoi(killable) != 0 || killable[0] == 'y' || killable[0] == 'Y'))
+                        assoc->isKillable = true;
+
                     bool isFileArg = false;
                     if (args)
                     {
