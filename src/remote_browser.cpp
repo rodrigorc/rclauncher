@@ -6,6 +6,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <string.h>
 
 #include <regex.h>
 #include <wordexp.h>
@@ -21,7 +22,7 @@
 #include "micairo.h"
 #include <gdk/gdkkeysyms.h>
 
-#include "xml/tinyxml.h"
+#include "xml/mixmlparse.h"
 
 using namespace miglib;
 
@@ -471,17 +472,19 @@ void MainWnd::Open(const std::string &path)
         //std::cout << "No assoc!"<< std::endl;
         return;
     }
-    //std::cout << "Assoc: "<< assoc->args[0] << std::endl;
+    std::cout << "Assoc:";
 
     std::vector<const char *> args;
     for (size_t i = 0; i < assoc->args.size(); ++i)
     {
         const std::string &arg = assoc->args[i];
-        if (arg == "$1")
+        if (arg == "{}")
             args.push_back(fullPath.c_str());
         else
             args.push_back(arg.c_str());
+        std::cout << " " << args.back() ;
     }
+    std::cout<< std::endl;
     args.push_back(NULL);
     if (gdk_spawn_on_screen(gdk_screen_get_default(), NULL, const_cast<char**>(args.data()), NULL, 
                 GSpawnFlags(G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD), 
@@ -717,75 +720,124 @@ void MainWnd::OnLircCommand(const char *cmd)
         std::cout << "Unknown cmd: " << cmd << std::endl;
 }
 
-int main(int argc, char **argv)
+class RBParser : public MI_XML_Parser
 {
-    TiXmlDocument xml;
-    if (xml.LoadFile("remote_browser.xml"))
+public:
+    RBParser()
     {
-        TiXmlElement *config = xml.FirstChildElement("config"); 
-        TiXmlElement *favorites = config->FirstChildElement("favorites");
-        if (favorites)
+        m_stack.push_back(ST_INIT);
+    }
+protected:
+    virtual void XML_StartElementHandler(const XML_Char *name, const XML_Char **atts)
+    {
+        State next = ST_NONE;
+        switch (m_stack.back())
         {
-            for (TiXmlElement *fav = favorites->FirstChildElement("favorite"); fav; fav = fav->NextSiblingElement("favorite"))
-            {
-                const char *id = fav->Attribute("id");
-                const char *name = fav->Attribute("name");
-                const char *path = fav->Attribute("path");
-                if (!id || !name || !path)
-                    continue;
-                Favorite f;
-                f.id = atoi(id);
-                if (f.id == 0)
-                    continue;
-                f.name = name;
-                f.path = path;
-                g_favorites.push_back(f);
-            }
+        case ST_NONE:
+            break;
+        case ST_INIT:
+            if (strcmp(name, "config") == 0)
+                next = ST_CONFIG;
+            break;
+        case ST_CONFIG:
+            if (strcmp(name, "favorites") == 0)
+                next = ST_FAVORITES;
+            else if (strcmp(name, "file_assoc") == 0)
+                next = ST_FILE_ASSOC;
+            break;
+        case ST_FAVORITES:
+            if (strcmp(name, "favorite") == 0)
+                ParseFavorite(atts);
+            break;
+        case ST_FILE_ASSOC:
+            if (strcmp(name, "pattern") == 0)
+                ParsePattern(atts);
+            break;
         }
-        TiXmlElement *assoc = config->FirstChildElement("file_assoc");
-        if (assoc)
+        m_stack.push_back(next);
+    }
+    virtual void XML_EndElementHandler(const XML_Char *name)
+    {
+        m_stack.pop_back();
+    }
+private:
+    enum State { ST_NONE, ST_INIT, ST_CONFIG, ST_FAVORITES, ST_FILE_ASSOC };
+    std::vector<State> m_stack;
+
+    void ParseFavorite(const XML_Char **atts)
+    {
+        Favorite f;
+        for (int i=0; atts[i]; i += 2)
         {
-            for (TiXmlElement *pat = assoc->FirstChildElement("pattern"); pat; pat = pat->NextSiblingElement("pattern"))
+            const char *name = atts[i];
+            const char *val = atts[i+1];
+            if (strcmp(name, "num") == 0)
+                f.id = atoi(val);
+            else if (strcmp(name, "name") == 0)
+                f.name = val;
+            else if (strcmp(name, "path") == 0)
+                f.path = val;
+        }
+        if (f.id != 0 && !f.name.empty() && !f.path.empty())
+            g_favorites.push_back(f);
+    }
+    void ParsePattern(const XML_Char **atts)
+    {
+        const char *match = NULL, *cmd = NULL, *killable = NULL;
+        for (int i=0; atts[i]; i += 2)
+        {
+            const char *name = atts[i];
+            const char *val = atts[i+1];
+            if (strcmp(name, "match") == 0)
+                match = val;
+            else if (strcmp(name, "command") == 0)
+                cmd = val;
+            else if (strcmp(name, "killable") == 0)
+                killable = val;
+        }
+        if (!match)
+            return;
+
+        FileAssoc *assoc = NULL;
+        try
+        {
+            assoc = new FileAssoc(match, REG_EXTENDED | REG_ICASE | REG_NOSUB);
+            if (killable && (atoi(killable) != 0 || killable[0] == 'y' || killable[0] == 'Y'))
+                assoc->isKillable = true;
+
+            bool isFileArg = false;
+            if (cmd)
             {
-                FileAssoc *assoc = NULL;
-                try
+                wordexp_t words;
+                if (wordexp(cmd, &words, 0) == 0)
                 {
-                    const char *match = pat->Attribute("match");
-                    const char *args = pat->Attribute("command");
-                    const char *killable = pat->Attribute("killable");
-                    if (!match)
-                        continue;
-
-                    assoc = new FileAssoc(match, REG_EXTENDED | REG_ICASE | REG_NOSUB);
-                    if (killable && (atoi(killable) != 0 || killable[0] == 'y' || killable[0] == 'Y'))
-                        assoc->isKillable = true;
-
-                    bool isFileArg = false;
-                    if (args)
+                    for (size_t i = 0; i < words.we_wordc; ++i)
                     {
-                        wordexp_t words;
-                        wordexp(args, &words, 0);
-                        for (size_t i = 0; i < words.we_wordc; ++i)
-                        {
-                            const char *txt = words.we_wordv[i];
-                            assoc->args.push_back(txt);
-                            if (assoc->args.back().find("$1") != std::string::npos)
-                                isFileArg = true;
-                        }
-                        wordfree(&words);
+                        const char *txt = words.we_wordv[i];
+                        assoc->args.push_back(txt);
+                        if (assoc->args.back().find("{}") != std::string::npos)
+                            isFileArg = true;
                     }
-
-                    if (!isFileArg)
-                        assoc->args.push_back("$1");
-                    g_assocs.push_back(assoc);
-                }
-                catch (...)
-                {
-                    delete assoc;
+                    wordfree(&words);
                 }
             }
+
+            if (!isFileArg)
+                assoc->args.push_back("{}");
+            g_assocs.push_back(assoc);
+        }
+        catch (...)
+        {
+            delete assoc;
         }
     }
+};
+
+int main(int argc, char **argv)
+{
+    RBParser parser;
+    parser.ParseFile("remote_browser.xml");
+    //return 0;
 
     gtk_init(&argc, &argv);
 
@@ -798,3 +850,4 @@ int main(int argc, char **argv)
 
     return 0;
 }
+
