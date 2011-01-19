@@ -385,6 +385,10 @@ gboolean MainWnd::OnDrawKey(GtkWidget *w, GdkEventKey *e)
     case GDK_KEY_KP_0: 
         ChangeFavorite(10); 
         break;
+    case GDK_KEY_Escape:
+        if (m_isKillable && m_childPid)
+            kill(m_childPid, SIGTERM);
+        break;
     default:
         //std::cout << "Key: " << std::hex << e->keyval << std::dec << std::endl;
         break;
@@ -729,7 +733,7 @@ void MainWnd::OnLircCommand(const char *cmd)
 {
     if (m_childPid != 0)
     {
-        if (m_isKillable && strcmp(cmd, "kill") == 0)
+        if (m_isKillable && m_childPid && strcmp(cmd, "kill") == 0)
             kill(m_childPid, SIGTERM);
         return;
     }
@@ -753,12 +757,12 @@ void MainWnd::OnLircCommand(const char *cmd)
         std::cout << "Unknown cmd: " << cmd << std::endl;
 }
 
-class RCParser2 : public Simple_XML_Parser
+class RCParser : public Simple_XML_Parser
 {
 private:
     enum State { TAG_CONFIG, TAG_FAVORITES, TAG_FILE_ASSOC, TAG_GRAPHICS, TAG_FONT, TAG_COLOR, TAG_FAVORITE, TAG_PATTERN };
 public:
-    RCParser2()
+    RCParser()
     {
         SetStateNext(TAG_INIT, "config", TAG_CONFIG, NULL);
         {
@@ -869,187 +873,7 @@ private:
     }
 };
 
-/**/
-class RCParser : public MiXML_Parser
-{
-public:
-    RCParser()
-    {
-        m_stack.push_back(TAG_INIT);
-    }
-protected:
-    virtual void XML_StartElementHandler(const XML_Char *name, const XML_Char **atts)
-    {
-        State next = TAG_NONE;
-        switch (m_stack.back())
-        {
-        default:
-            break;
-        case TAG_INIT:
-            if (strcmp(name, "rcbrowser") == 0)
-                next = TAG_ROOT;
-            break;
-        case TAG_ROOT:
-            if (strcmp(name, "favorites") == 0)
-                next = TAG_FAVORITES;
-            else if (strcmp(name, "file_assoc") == 0)
-                next = TAG_FILE_ASSOC;
-            else if (strcmp(name, "graphics") == 0)
-                next = TAG_GRAPHICS;
-            break;
-        case TAG_FAVORITES:
-            if (strcmp(name, "favorite") == 0)
-                ParseFavorite(atts);
-            break;
-        case TAG_FILE_ASSOC:
-            if (strcmp(name, "pattern") == 0)
-                ParsePattern(atts, true);
-            else if (strcmp(name, "extension") == 0)
-                ParsePattern(atts, false);
-            break;
-        case TAG_GRAPHICS:
-            if (strcmp(name, "font") == 0)
-                ParseFont(atts);
-            else if (strcmp(name, "color") == 0)
-                ParseColor(atts);
-            break;
-        }
-        m_stack.push_back(next);
-    }
-    virtual void XML_EndElementHandler(const XML_Char *name)
-    {
-        m_stack.pop_back();
-    }MI_XML_Parser
-private:
-    enum State { TAG_NONE, TAG_INIT, TAG_ROOT, TAG_FAVORITES, TAG_FILE_ASSOC, TAG_GRAPHICS };
-    std::vector<State> m_stack;
-
-    void ParseFavorite(const XML_Char **atts)
-    {
-        Favorite f;
-        for (int i=0; atts[i]; i += 2)
-        {
-            const char *name = atts[i];
-            const char *val = atts[i+1];
-            if (strcmp(name, "num") == 0)
-                f.id = atoi(val);
-            else if (strcmp(name, "name") == 0)
-                f.name = val;
-            else if (strcmp(name, "path") == 0)
-                f.path = val;
-        }
-        if (f.id != 0 && !f.name.empty() && !f.path.empty())
-            g_options.favorites.push_back(f);
-    }
-    void ParsePattern(const XML_Char **atts, bool isRegex)
-    {
-        const char *match = NULL, *cmd = NULL, *killable = NULL;
-        for (int i=0; atts[i]; i += 2)
-        {
-            const char *name = atts[i];
-            const char *val = atts[i+1];
-            if ((isRegex && strcmp(name, "match") == 0) || (!isRegex && strcmp(name, "ext") == 0))
-                match = val;
-            else if (strcmp(name, "command") == 0)
-                cmd = val;
-            else if (strcmp(name, "killable") == 0)
-                killable = val;
-        }
-        if (!match)
-            return;
-        std::string extRegex;
-        if (!isRegex)
-        {
-            //build a regex to match the extension
-            extRegex = std::string("\\.") + match + "$";
-            match = extRegex.c_str();
-        }
-
-        FileAssoc *assoc = NULL;
-        try
-        {
-            assoc = new FileAssoc(match, REG_EXTENDED | REG_ICASE | REG_NOSUB);
-            if (killable && (atoi(killable) != 0 || killable[0] == 'y' || killable[0] == 'Y'))
-                assoc->isKillable = true;
-
-            bool isFileArg = false;
-            if (cmd)
-            {
-                wordexp_t words;
-                if (wordexp(cmd, &words, 0) == 0)
-                {
-                    for (size_t i = 0; i < words.we_wordc; ++i)
-                    {
-                        const char *txt = words.we_wordv[i];
-                        assoc->args.push_back(txt);
-                        if (assoc->args.back().find("{}") != std::string::npos)
-                            isFileArg = true;
-                    }
-                    wordfree(&words);
-                }
-            }
-
-            if (!isFileArg)
-                assoc->args.push_back("{}");
-            g_options.assocs.push_back(assoc);
-        }
-        catch (...)
-        {
-            delete assoc;
-        }
-    }
-    void ParseFont(const XML_Char **atts)
-    {
-        const char *fontName = NULL, *fontDesc = NULL;
-        for (int i=0; atts[i]; i += 2)
-        {
-            const char *name = atts[i];
-            const char *val = atts[i+1];
-
-            if (strcmp(name, "name") == 0)
-                fontName = val;
-            else if (strcmp(name, "desc") == 0)
-                fontDesc = val;
-        }
-        if (!fontName || !fontDesc)
-            return;
-        if (strcmp(fontName, "normal") == 0)
-            g_options.gr.descFont = fontDesc;
-        else if (strcmp(fontName, "title") == 0)
-            g_options.gr.descFontTitle = fontDesc;
-    }
-    void ParseColor(const XML_Char **atts)
-    {
-        const char *colorName = NULL;
-        GraphicsOptions::Color color = {0,0,0};
-        for (int i=0; atts[i]; i += 2)
-        {
-            const char *name = atts[i];
-            const char *val = atts[i+1];
-
-            if (strcmp(name, "name") == 0)
-                colorName = val;
-            else if (strcmp(name, "r") == 0)
-                color.r = atof(val);
-            else if (strcmp(name, "g") == 0)
-                color.g = atof(val);
-            else if (strcmp(name, "b") == 0)
-                color.b = atof(val);
-        }
-        if (!colorName)
-            return;
-        if (strcmp(colorName, "fg") == 0)
-            g_options.gr.colorFg = color;
-        else if (strcmp(colorName, "bg") == 0)
-            g_options.gr.colorBg = color;
-        else if (strcmp(colorName, "scroll") == 0)
-            g_options.gr.colorScroll = color;
-    }
-
-};
-/**/
-
-void Help(char *argv0)
+static void Help(char *argv0)
 {
     std::cout
     << "RCBrowser - A file browser designed to be used with a lirc remote contoller.\n"
@@ -1098,8 +922,7 @@ int main(int argc, char **argv)
         }
     }
 
-    RCParser2().ParseFile(configFile);
-    //RCParser().ParseFile(configFile);
+    RCParser().ParseFile(configFile);
 
     MainWnd mainWnd(lircFile);
 
