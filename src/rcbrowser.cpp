@@ -34,7 +34,7 @@ struct ILircClient
 class LircClient
 {
 public:
-    LircClient(ILircClient *cli);
+    LircClient(const std::string &confFile, ILircClient *cli);
     ~LircClient();
 private:
     int m_fd;
@@ -44,24 +44,25 @@ private:
     gboolean OnIo(GIOChannel *io, GIOCondition cond);
 };
 
-LircClient::LircClient(ILircClient *cli)
+LircClient::LircClient(const std::string &confFile, ILircClient *cli)
     :m_fd(-1), m_cfg(NULL), m_cli(cli)
 {
-    m_fd = lirc_init("remote_browser", 1);
-
-    m_io.Reset( g_io_channel_unix_new(m_fd) );
-    g_io_channel_set_raw_nonblock(m_io, NULL);
-
-    MIGLIB_IO_ADD_WATCH(m_io, G_IO_IN, LircClient, OnIo, this);
-
-    lirc_readconfig("remote_browser.lirc", &m_cfg, NULL);
+    m_fd = lirc_init(const_cast<char*>("rcbrowser"), 0);
+    if (m_fd != -1)
+    { //Errors are silently ignored
+        m_io.Reset( g_io_channel_unix_new(m_fd) );
+        g_io_channel_set_raw_nonblock(m_io, NULL);
+        MIGLIB_IO_ADD_WATCH(m_io, G_IO_IN, LircClient, OnIo, this);
+        lirc_readconfig(confFile.empty()? NULL : const_cast<char*>(confFile.c_str()), &m_cfg, NULL);
+    }
 }
 
 LircClient::~LircClient()
 {
     if (m_cfg)
         lirc_freeconfig(m_cfg);
-    lirc_deinit();
+    if (m_fd != -1)
+        lirc_deinit();
 }
 
 gboolean LircClient::OnIo(GIOChannel *io, GIOCondition cond)
@@ -119,20 +120,8 @@ struct FileAssoc
         :regex(re, cflags), isKillable(false)
     {
     }
+    static FileAssoc *Match(const std::string &file);
 };
-
-std::vector<FileAssoc*> g_assocs;
-
-FileAssoc *MatchFile(const std::string &file)
-{
-    for (size_t i = 0; i < g_assocs.size(); ++i)
-    {
-        FileAssoc *assoc = g_assocs[i];
-        if (regexec(assoc->regex, file.c_str(), 0, NULL, 0) == REG_NOERROR)
-            return assoc;
-    }
-    return NULL;
-}
 
 
 struct DirEntry
@@ -157,7 +146,7 @@ struct DirEntry
     }
 };
 
-void list_dir(const std::string &path, std::vector<DirEntry> &files)
+static void list_dir(const std::string &path, std::vector<DirEntry> &files)
 {
     files.clear();
     if (path != "/")
@@ -205,7 +194,7 @@ void list_dir(const std::string &path, std::vector<DirEntry> &files)
         }
         else if (type == T_File)
         {
-            if (MatchFile(name))
+            if (FileAssoc::Match(name))
                 files.push_back(DirEntry(name, false));
         }
     }
@@ -220,12 +209,59 @@ struct Favorite
     int id;
     std::string name, path;
 };
-std::vector<Favorite> g_favorites;
+
+struct GraphicsOptions
+{
+    std::string descFont, descFontTitle;
+    struct Color
+    {
+        double r, g, b;
+
+        void set_source(cairo_t *cr)
+        {
+            cairo_set_source_rgb(cr, r, g, b);
+        }
+    };
+    Color colorFg, colorBg, colorScroll;
+
+    GraphicsOptions()
+    {
+        descFont = "DejaVu Sans 24";
+        descFontTitle = "DejaVu Sans Bold 40 ";
+        colorFg.r = colorFg.g = colorFg.b = 1;
+        colorBg.r = colorBg.g = colorBg.b = 0;
+        colorScroll.r = colorScroll.g = colorScroll.b = 0.75;
+    }
+};
+
+struct Options
+{
+    GraphicsOptions gr;
+    std::vector<FileAssoc*> assocs;
+    std::vector<Favorite> favorites;
+
+    ~Options()
+    {
+        for (size_t i = 0; i < assocs.size(); ++i)
+            delete assocs[i];
+    }
+} g_options;
+
+/*static*/FileAssoc *FileAssoc::Match(const std::string &file)
+{
+    for (size_t i = 0; i < g_options.assocs.size(); ++i)
+    {
+        FileAssoc *assoc = g_options.assocs[i];
+        if (regexec(assoc->regex, file.c_str(), 0, NULL, 0) == REG_NOERROR)
+            return assoc;
+    }
+    return NULL;
+}
 
 class MainWnd : private ILircClient
 {
 public:
-    MainWnd();
+    MainWnd(const std::string &lircFile);
 
 private:
     GtkWindowPtr m_wnd;
@@ -238,6 +274,8 @@ private:
     std::string m_childText;
     bool m_isKillable;
     int m_favoriteIdx;
+
+    PangoFontDescriptionPtr m_font, m_fontTitle;
 
     void OnDestroy(GtkObject *w)
     {
@@ -260,8 +298,8 @@ private:
 };
 
 
-MainWnd::MainWnd()
-    :m_lirc(this), m_childPid(0), m_isKillable(false), m_favoriteIdx(-1)
+MainWnd::MainWnd(const std::string &lircFile)
+    :m_lirc(lircFile, this), m_childPid(0), m_isKillable(false), m_favoriteIdx(-1)
 {
     m_wnd.Reset( gtk_window_new(GTK_WINDOW_TOPLEVEL) );
     MIGTK_OBJECT_destroy(m_wnd, MainWnd, OnDestroy, this);
@@ -270,7 +308,7 @@ MainWnd::MainWnd()
     MIGTK_WIDGET_expose_event(m_draw, MainWnd, OnDrawExpose, this);
     gtk_widget_set_can_focus(m_draw, TRUE);
     MIGTK_WIDGET_key_press_event(m_draw, MainWnd, OnDrawKey, this);
-    GdkColor black = {0, 0x0000, 0x0000, 0x0000};
+    GdkColor black = {0, 0xFFFF * g_options.gr.colorBg.r, 0xFFFF * g_options.gr.colorBg.g, 0xFFFF * g_options.gr.colorBg.b};
     gtk_widget_modify_bg(m_draw, GTK_STATE_NORMAL, &black);
     gtk_container_add(m_wnd, m_draw);
 
@@ -431,9 +469,9 @@ void MainWnd::ChangePath(const std::string &path, bool findFav /*=true*/)
     if (findFav)
     {
         m_favoriteIdx = -1;
-        for (size_t i = 0; i < g_favorites.size(); ++i)
+        for (size_t i = 0; i < g_options.favorites.size(); ++i)
         {
-            if (g_favorites[i].path == path.substr(0, g_favorites[i].path.size()))
+            if (g_options.favorites[i].path == path.substr(0, g_options.favorites[i].path.size()))
             {
                 m_favoriteIdx = i;
                 break;
@@ -446,15 +484,15 @@ void MainWnd::ChangePath(const std::string &path, bool findFav /*=true*/)
 bool MainWnd::ChangeFavorite(int nfav)
 {
     size_t i;
-    for (i = 0; i < g_favorites.size(); ++i)
+    for (i = 0; i < g_options.favorites.size(); ++i)
     {
-        if (g_favorites[i].id == nfav)
+        if (g_options.favorites[i].id == nfav)
             break;
     }
-    if (i == g_favorites.size())
+    if (i == g_options.favorites.size())
         return false;
 
-    Favorite &fav = g_favorites[i];
+    Favorite &fav = g_options.favorites[i];
 
     m_favoriteIdx = i;
     ChangePath(fav.path, false);
@@ -466,7 +504,7 @@ void MainWnd::Open(const std::string &path)
     std::string fullPath = m_cwd + "/" + path;
     //std::cout << "Run " << fullPath << std::endl;
 
-    FileAssoc *assoc = MatchFile(path);
+    FileAssoc *assoc = FileAssoc::Match(path);
     if (!assoc)
     {
         //std::cout << "No assoc!"<< std::endl;
@@ -523,23 +561,19 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
     PangoLayoutPtr layout(pango_cairo_create_layout(cr));
     pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_MIDDLE);
 
-    PangoFontDescriptionPtr font(pango_font_description_new());
-    pango_font_description_set_family(font, "Ubuntu");
-    pango_font_description_set_size(font, 24 * PANGO_SCALE);
-
-    PangoFontDescriptionPtr fontTitle(pango_font_description_new());
-    pango_font_description_set_family(fontTitle, "Ubuntu");
-    pango_font_description_set_size(fontTitle, 40 * PANGO_SCALE);
-    pango_font_description_set_weight(fontTitle, PANGO_WEIGHT_BOLD);
+    if (!m_font)
+        m_font.Reset(pango_font_description_from_string(g_options.gr.descFont.c_str()));
+    if (!m_fontTitle)
+        m_fontTitle.Reset(pango_font_description_from_string(g_options.gr.descFontTitle.c_str()));
     
     pango_layout_set_text(layout, "M", 1);
     PangoRectangle baseRect;
 
-    pango_layout_set_font_description(layout, fontTitle);
+    pango_layout_set_font_description(layout, m_fontTitle);
     pango_layout_get_extents(layout, NULL, &baseRect);
     double titleH = double(baseRect.height) / PANGO_SCALE;
 
-    pango_layout_set_font_description(layout, font);
+    pango_layout_set_font_description(layout, m_font);
     pango_layout_get_extents(layout, NULL, &baseRect);
     double lineH = double(baseRect.height) / PANGO_SCALE;
 
@@ -552,7 +586,7 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
     szH = nLines * lineH;
     marginY2 = size.height - (marginY1 + szH);
 
-    cairo_set_source_rgb(cr, 1, 1, 1);
+    g_options.gr.colorFg.set_source(cr);
     cairo_translate(cr, marginX1, marginY1);
 
     cairo_matrix_t matrix;
@@ -570,17 +604,17 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
     {
         double thumbY = m_firstLine * szH / m_files.size();
         double thumbH = nLines * szH / m_files.size();
-        cairo_set_source_rgb(cr, 0.75, 0.75, 0.75);
+        g_options.gr.colorScroll.set_source(cr);
         cairo_rectangle(cr, szW, thumbY, scrollW, thumbH);
         cairo_fill(cr);
-        cairo_set_source_rgb(cr, 1, 1, 1);
+        g_options.gr.colorFg.set_source(cr);
     }
     else
     {
-        cairo_set_source_rgb(cr, 0.2, 0.2, 0.2);
+        g_options.gr.colorBg.set_source(cr);
         cairo_rectangle(cr, szW, 0, scrollW, szH);
         cairo_fill(cr);
-        cairo_set_source_rgb(cr, 1, 1, 1);
+        g_options.gr.colorFg.set_source(cr);
     }
     cairo_rectangle(cr, 0, 0, szW, szH);
     cairo_rectangle(cr, szW, 0, scrollW, szH);
@@ -595,10 +629,10 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
         pango_layout_set_text(layout, entry.name.data(), entry.name.size());
         if (static_cast<int>(nLine) == m_lineSel)
         {
-            cairo_set_source_rgb(cr, 1, 1, 1);
+            g_options.gr.colorFg.set_source(cr);
             cairo_rectangle(cr, 0, 0, szW, lineH);
             cairo_fill(cr);
-            cairo_set_source_rgb(cr, 0, 0, 0);
+            g_options.gr.colorBg.set_source(cr);
         }
         if (entry.isDir)
         {
@@ -629,18 +663,18 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
         else
             cairo_translate(cr, -DELTA_X / 4, 0);
         if (static_cast<int>(nLine) == m_lineSel)
-            cairo_set_source_rgb(cr, 1, 1, 1);
+            g_options.gr.colorFg.set_source(cr);
 
         cairo_translate(cr, 0, lineH);
     }
 
-    pango_layout_set_font_description(layout, fontTitle);
+    pango_layout_set_font_description(layout, m_fontTitle);
     pango_layout_set_width(layout, (szW + scrollW) * PANGO_SCALE);
 
     std::string title;
-    if (m_favoriteIdx >= 0 && m_favoriteIdx < static_cast<int>(g_favorites.size()))
+    if (m_favoriteIdx >= 0 && m_favoriteIdx < static_cast<int>(g_options.favorites.size()))
     {
-        const Favorite &fav = g_favorites[m_favoriteIdx];
+        const Favorite &fav = g_options.favorites[m_favoriteIdx];
         if (m_cwd.size() >= fav.path.size())
         {
             title = fav.name + ": " + m_cwd.substr(fav.path.size());
@@ -676,9 +710,9 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
         cairo_set_matrix(cr, &matrix);
         cairo_translate(cr, (size.width - childW) / 2 - marginX1, (size.height - childH) / 2 - marginY1);
         cairo_rectangle(cr, 0, 0, childW, childH);
-        cairo_set_source_rgb(cr, 0, 0, 0);
+        g_options.gr.colorBg.set_source(cr);
         cairo_fill_preserve(cr);
-        cairo_set_source_rgb(cr, 1, 1, 1);
+        g_options.gr.colorFg.set_source(cr);
         cairo_stroke(cr);
         cairo_translate(cr, marginChildW, marginChildH);
         pango_cairo_show_layout(cr, layout);
@@ -733,17 +767,19 @@ protected:
         State next = ST_NONE;
         switch (m_stack.back())
         {
-        case ST_NONE:
+        default:
             break;
         case ST_INIT:
-            if (strcmp(name, "config") == 0)
-                next = ST_CONFIG;
+            if (strcmp(name, "rcbrowser") == 0)
+                next = ST_ROOT;
             break;
-        case ST_CONFIG:
+        case ST_ROOT:
             if (strcmp(name, "favorites") == 0)
                 next = ST_FAVORITES;
             else if (strcmp(name, "file_assoc") == 0)
                 next = ST_FILE_ASSOC;
+            else if (strcmp(name, "graphics") == 0)
+                next = ST_GRAPHICS;
             break;
         case ST_FAVORITES:
             if (strcmp(name, "favorite") == 0)
@@ -751,7 +787,15 @@ protected:
             break;
         case ST_FILE_ASSOC:
             if (strcmp(name, "pattern") == 0)
-                ParsePattern(atts);
+                ParsePattern(atts, true);
+            else if (strcmp(name, "extension") == 0)
+                ParsePattern(atts, false);
+            break;
+        case ST_GRAPHICS:
+            if (strcmp(name, "font") == 0)
+                ParseFont(atts);
+            else if (strcmp(name, "color") == 0)
+                ParseColor(atts);
             break;
         }
         m_stack.push_back(next);
@@ -761,7 +805,7 @@ protected:
         m_stack.pop_back();
     }
 private:
-    enum State { ST_NONE, ST_INIT, ST_CONFIG, ST_FAVORITES, ST_FILE_ASSOC };
+    enum State { ST_NONE, ST_INIT, ST_ROOT, ST_FAVORITES, ST_FILE_ASSOC, ST_GRAPHICS };
     std::vector<State> m_stack;
 
     void ParseFavorite(const XML_Char **atts)
@@ -779,16 +823,16 @@ private:
                 f.path = val;
         }
         if (f.id != 0 && !f.name.empty() && !f.path.empty())
-            g_favorites.push_back(f);
+            g_options.favorites.push_back(f);
     }
-    void ParsePattern(const XML_Char **atts)
+    void ParsePattern(const XML_Char **atts, bool isRegex)
     {
         const char *match = NULL, *cmd = NULL, *killable = NULL;
         for (int i=0; atts[i]; i += 2)
         {
             const char *name = atts[i];
             const char *val = atts[i+1];
-            if (strcmp(name, "match") == 0)
+            if ((isRegex && strcmp(name, "match") == 0) || (!isRegex && strcmp(name, "ext") == 0))
                 match = val;
             else if (strcmp(name, "command") == 0)
                 cmd = val;
@@ -797,6 +841,13 @@ private:
         }
         if (!match)
             return;
+        std::string extRegex;
+        if (!isRegex)
+        {
+            //build a regex to match the extension
+            extRegex = std::string("\\.") + match + "$";
+            match = extRegex.c_str();
+        }
 
         FileAssoc *assoc = NULL;
         try
@@ -824,29 +875,117 @@ private:
 
             if (!isFileArg)
                 assoc->args.push_back("{}");
-            g_assocs.push_back(assoc);
+            g_options.assocs.push_back(assoc);
         }
         catch (...)
         {
             delete assoc;
         }
     }
+    void ParseFont(const XML_Char **atts)
+    {
+        const char *fontName = NULL, *fontDesc = NULL;
+        for (int i=0; atts[i]; i += 2)
+        {
+            const char *name = atts[i];
+            const char *val = atts[i+1];
+
+            if (strcmp(name, "name") == 0)
+                fontName = val;
+            else if (strcmp(name, "desc") == 0)
+                fontDesc = val;
+        }
+        if (!fontName || !fontDesc)
+            return;
+        if (strcmp(fontName, "normal") == 0)
+            g_options.gr.descFont = fontDesc;
+        else if (strcmp(fontName, "title") == 0)
+            g_options.gr.descFontTitle = fontDesc;
+    }
+    void ParseColor(const XML_Char **atts)
+    {
+        const char *colorName = NULL;
+        GraphicsOptions::Color color = {0,0,0};
+        for (int i=0; atts[i]; i += 2)
+        {
+            const char *name = atts[i];
+            const char *val = atts[i+1];
+
+            if (strcmp(name, "name") == 0)
+                colorName = val;
+            else if (strcmp(name, "r") == 0)
+                color.r = atof(val);
+            else if (strcmp(name, "g") == 0)
+                color.g = atof(val);
+            else if (strcmp(name, "b") == 0)
+                color.b = atof(val);
+        }
+        if (!colorName)
+            return;
+        if (strcmp(colorName, "fg") == 0)
+            g_options.gr.colorFg = color;
+        else if (strcmp(colorName, "bg") == 0)
+            g_options.gr.colorBg = color;
+        else if (strcmp(colorName, "scroll") == 0)
+            g_options.gr.colorScroll = color;
+    }
+
 };
+
+void Help(char *argv0)
+{
+    std::cout
+    << "RCBrowser - A file browser designed to be used with a lirc remote contoller.\n"
+    << "Copyright (c) 2011: Rodrigo Rivas Costa <rodrigorivascosta@gmail.com>\n"
+    << "\n"
+    << "This program comes with NO WARRANTY, to the extent permitted by law. You\n"
+    << "may redistribute copies of it under the terms of the GNU GPL Version 2 or\n"
+    << "newer. For more information about these matters, see the file LICENSE.\n"
+    << "\n";
+    std::cout 
+    << "Usage: " << argv0 << " [-l <lirc-file>] [-c <config-file>]\n"
+    << "\t-l <lirc-file>\n"
+    << "\t    Read lirc command definitions from this file instead of the\n"
+    << "\t    default one, usually ~/.lircrc.\n"
+    << "\t-c <config-file>\n"
+    << "\t    Use this configuration file instead of the default one, which\n"
+    << "\t    is (~/.rcbrowser).\n"
+    << std::endl;
+}
 
 int main(int argc, char **argv)
 {
-    RBParser parser;
-    parser.ParseFile("remote_browser.xml");
-    //return 0;
-
     gtk_init(&argc, &argv);
 
-    MainWnd mainWnd;
+    const char *home = getenv("HOME");
+    if (!home)
+        home = ".";
+
+    std::string configFile = std::string(home) +  "/.rcbrowser";
+    std::string lircFile;
+
+    int op;
+    while ((op = getopt(argc, argv, "c:l:")) != -1)
+    {
+        switch (op)
+        {
+        case '?':
+            Help(argv[0]);
+            return 1;
+        case 'c':
+            configFile = optarg;
+            break;
+        case 'l':
+            lircFile = optarg;
+            break;
+        }
+    }
+
+    RBParser().ParseFile(configFile);
+
+    MainWnd mainWnd(lircFile);
 
     gtk_main();
-
-    for (size_t i = 0; i < g_assocs.size(); ++i)
-        delete g_assocs[i];
 
     return 0;
 }

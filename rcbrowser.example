@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<rcbrowser>
+    <graphics>
+        <font name="normal" desc="DejaVu Serif 24" />
+        <font name="title" desc="DejaVu Serif 40" />
+        <color name="fg" r="1" g="1" b="1" />
+        <color name="bg" r="0" g="0" b="0" />
+        <color name="scroll" r="0.75" g="0.75" b="0.75" />
+    </graphics>
+    <favorites>
+        <favorite num="1" name="Home" path="/home/rodrigo" />
+        <favorite num="2" name="Video" path="/home/rodrigo/Videos" />
+        <favorite num="3" name="Temp" path="/tmp" />
+    </favorites>
+    <file_assoc>
+        <pattern match="\.(avi|mpg|mkv|wmv)$" command="mplayer -fs" />
+        <pattern match="^FlashXX" command="mplayer -fs" />
+        <extension ext="mp3" command="totem --fullscreen" />
+        <extension ext="jpg" command="eog --fullscreen" killable="1"/>
+    </file_assoc>
+</rcbrowser>

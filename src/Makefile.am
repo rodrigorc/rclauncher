@@ -3,5 +3,5 @@ AM_CPPFLAGS+=-DDATADIR=\"$(datadir)\" -I"$(UTIL)" -DGTK_DISABLE_DEPRECATED -DG_D
 
 LDADD=$(GTK_LIBS) -llirc_client
 
-bin_PROGRAMS=remote_browser
-remote_browser_SOURCES=remote_browser.cpp
+bin_PROGRAMS=rcbrowser
+rcbrowser_SOURCES=rcbrowser.cpp
