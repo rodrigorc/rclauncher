@@ -14,7 +14,6 @@
 #include <string>
 #include <vector>
 #include <iostream>
-#include <algorithm>
 
 #include "miglib/migtk.h"
 #include "miglib/migtkconn.h"
@@ -22,7 +21,7 @@
 #include "micairo.h"
 #include <gdk/gdkkeysyms.h>
 
-#include "xml/mixmlparse.h"
+#include "xml/simplexmlparse.h"
 
 using namespace miglib;
 
@@ -754,44 +753,161 @@ void MainWnd::OnLircCommand(const char *cmd)
         std::cout << "Unknown cmd: " << cmd << std::endl;
 }
 
-class RBParser : public MI_XML_Parser
+class RCParser2 : public Simple_XML_Parser
+{
+private:
+    enum State { TAG_CONFIG, TAG_FAVORITES, TAG_FILE_ASSOC, TAG_GRAPHICS, TAG_FONT, TAG_COLOR, TAG_FAVORITE, TAG_PATTERN };
+public:
+    RCParser2()
+    {
+        SetStateNext(TAG_INIT, "config", TAG_CONFIG, NULL);
+        {
+            SetStateNext(TAG_CONFIG, "graphics", TAG_GRAPHICS, "favorites", TAG_FAVORITES, "file_assoc", TAG_FILE_ASSOC, NULL);
+            {
+                SetStateNext(TAG_GRAPHICS, "font", TAG_FONT, "color", TAG_COLOR, NULL);
+                SetStateNext(TAG_FAVORITES, "favorite", TAG_FAVORITE, NULL);
+                SetStateNext(TAG_FILE_ASSOC, "pattern", TAG_PATTERN, "extension", TAG_PATTERN, NULL);
+            }
+        }
+        SetStateAttr(TAG_FONT, "name", "desc", NULL);
+        SetStateAttr(TAG_COLOR, "name", "r", "g", "b", NULL);
+        SetStateAttr(TAG_FAVORITE, "num", "name", "path", NULL);
+        SetStateAttr(TAG_PATTERN, "match", "ext", "command", "killable", NULL);
+    }
+protected:
+    virtual void StartState(int state, const std::string &name, const attributes_t &atts)
+    {
+        switch (state)
+        {
+        case TAG_FONT:
+            ParseFont(atts);
+            break;
+        case TAG_COLOR:
+            ParseColor(atts);
+            break;
+        case TAG_FAVORITE:
+            ParseFavorite(atts);
+            break;
+        case TAG_PATTERN:
+            ParsePattern(atts, name == "pattern");
+            break;
+        }
+    }
+private:
+    void ParseFont(const attributes_t &atts)
+    {
+        const std::string &name = atts[0], &desc = atts[1];
+
+        if (name == "normal")
+            g_options.gr.descFont = desc;
+        else if (name == "title")
+            g_options.gr.descFontTitle = desc;
+    }
+    void ParseColor(const attributes_t &atts)
+    {
+        const std::string &name = atts[0], &r = atts[1], &g = atts[2], &b = atts[3];
+
+        GraphicsOptions::Color color = {atof(r.c_str()), atof(g.c_str()), atof(b.c_str())};
+        if (name == "fg")
+            g_options.gr.colorFg = color;
+        else if (name == "bg")
+            g_options.gr.colorBg = color;
+        else if (name == "scroll")
+            g_options.gr.colorScroll = color;
+    }
+    void ParseFavorite(const attributes_t &atts)
+    {
+        const std::string &num = atts[0], &name = atts[1], &path = atts[2];
+
+        Favorite f;
+        f.id = atoi(num.c_str());
+        f.name = name;
+        f.path = path;
+        if (f.id != 0 && !f.name.empty() && !f.path.empty())
+            g_options.favorites.push_back(f);
+    }
+    void ParsePattern(const attributes_t &atts, bool isRegex)
+    {
+        const std::string &match = atts[0], &ext = atts[1], &command = atts[2], &killable = atts[3];
+        if ((isRegex && match.empty()) || (!isRegex && ext.empty()))
+            return;
+        const std::string &regex = isRegex? match : ("\\." + ext + "$");
+
+        FileAssoc *assoc = NULL;
+        try
+        {
+            assoc = new FileAssoc(regex.c_str(), REG_EXTENDED | REG_ICASE | REG_NOSUB);
+            if (!killable.empty() && 
+                    (atoi(killable.c_str()) != 0 || killable[0] == 'y' || killable[0] == 'Y'))
+                assoc->isKillable = true;
+
+            bool isFileArg = false;
+            if (!command.empty())
+            {
+                wordexp_t words;
+                if (wordexp(command.c_str(), &words, 0) == 0)
+                {
+                    for (size_t i = 0; i < words.we_wordc; ++i)
+                    {
+                        const char *txt = words.we_wordv[i];
+                        assoc->args.push_back(txt);
+                        if (assoc->args.back().find("{}") != std::string::npos)
+                            isFileArg = true;
+                    }
+                    wordfree(&words);
+                }
+            }
+
+            if (!isFileArg)
+                assoc->args.push_back("{}");
+            g_options.assocs.push_back(assoc);
+        }
+        catch (...)
+        {
+            delete assoc;
+        }
+    }
+};
+
+/**/
+class RCParser : public MiXML_Parser
 {
 public:
-    RBParser()
+    RCParser()
     {
-        m_stack.push_back(ST_INIT);
+        m_stack.push_back(TAG_INIT);
     }
 protected:
     virtual void XML_StartElementHandler(const XML_Char *name, const XML_Char **atts)
     {
-        State next = ST_NONE;
+        State next = TAG_NONE;
         switch (m_stack.back())
         {
         default:
             break;
-        case ST_INIT:
+        case TAG_INIT:
             if (strcmp(name, "rcbrowser") == 0)
-                next = ST_ROOT;
+                next = TAG_ROOT;
             break;
-        case ST_ROOT:
+        case TAG_ROOT:
             if (strcmp(name, "favorites") == 0)
-                next = ST_FAVORITES;
+                next = TAG_FAVORITES;
             else if (strcmp(name, "file_assoc") == 0)
-                next = ST_FILE_ASSOC;
+                next = TAG_FILE_ASSOC;
             else if (strcmp(name, "graphics") == 0)
-                next = ST_GRAPHICS;
+                next = TAG_GRAPHICS;
             break;
-        case ST_FAVORITES:
+        case TAG_FAVORITES:
             if (strcmp(name, "favorite") == 0)
                 ParseFavorite(atts);
             break;
-        case ST_FILE_ASSOC:
+        case TAG_FILE_ASSOC:
             if (strcmp(name, "pattern") == 0)
                 ParsePattern(atts, true);
             else if (strcmp(name, "extension") == 0)
                 ParsePattern(atts, false);
             break;
-        case ST_GRAPHICS:
+        case TAG_GRAPHICS:
             if (strcmp(name, "font") == 0)
                 ParseFont(atts);
             else if (strcmp(name, "color") == 0)
@@ -803,9 +919,9 @@ protected:
     virtual void XML_EndElementHandler(const XML_Char *name)
     {
         m_stack.pop_back();
-    }
+    }MI_XML_Parser
 private:
-    enum State { ST_NONE, ST_INIT, ST_ROOT, ST_FAVORITES, ST_FILE_ASSOC, ST_GRAPHICS };
+    enum State { TAG_NONE, TAG_INIT, TAG_ROOT, TAG_FAVORITES, TAG_FILE_ASSOC, TAG_GRAPHICS };
     std::vector<State> m_stack;
 
     void ParseFavorite(const XML_Char **atts)
@@ -931,6 +1047,7 @@ private:
     }
 
 };
+/**/
 
 void Help(char *argv0)
 {
@@ -981,7 +1098,8 @@ int main(int argc, char **argv)
         }
     }
 
-    RBParser().ParseFile(configFile);
+    RCParser2().ParseFile(configFile);
+    //RCParser().ParseFile(configFile);
 
     MainWnd mainWnd(lircFile);
 
