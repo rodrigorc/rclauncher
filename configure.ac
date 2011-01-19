@@ -1,4 +1,4 @@
-AC_INIT([rcbrowser], [1.0], [rodrigorivascosta@gmail.com])
+AC_INIT([rclauncher], [1.0], [rodrigorivascosta@gmail.com])
 AC_CONFIG_AUX_DIR([auxdir])
 AM_INIT_AUTOMAKE([-Wall -Werror foreign])
 

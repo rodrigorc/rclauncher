@@ -46,7 +46,7 @@ private:
 LircClient::LircClient(const std::string &confFile, ILircClient *cli)
     :m_fd(-1), m_cfg(NULL), m_cli(cli)
 {
-    m_fd = lirc_init(const_cast<char*>("rcbrowser"), 0);
+    m_fd = lirc_init(const_cast<char*>("rclauncher"), 0);
     if (m_fd != -1)
     { //Errors are silently ignored
         m_io.Reset( g_io_channel_unix_new(m_fd) );
@@ -209,7 +209,7 @@ struct Favorite
     std::string name, path;
 };
 
-struct GraphicsOptions
+struct GraphicOptions
 {
     std::string descFont, descFontTitle;
     struct Color
@@ -223,7 +223,7 @@ struct GraphicsOptions
     };
     Color colorFg, colorBg, colorScroll;
 
-    GraphicsOptions()
+    GraphicOptions()
     {
         descFont = "DejaVu Sans 24";
         descFontTitle = "DejaVu Sans Bold 40 ";
@@ -235,7 +235,7 @@ struct GraphicsOptions
 
 struct Options
 {
-    GraphicsOptions gr;
+    GraphicOptions gr;
     std::vector<FileAssoc*> assocs;
     std::vector<Favorite> favorites;
 
@@ -811,7 +811,7 @@ private:
     {
         const std::string &name = atts[0], &r = atts[1], &g = atts[2], &b = atts[3];
 
-        GraphicsOptions::Color color = {atof(r.c_str()), atof(g.c_str()), atof(b.c_str())};
+        GraphicOptions::Color color = {atof(r.c_str()), atof(g.c_str()), atof(b.c_str())};
         if (name == "fg")
             g_options.gr.colorFg = color;
         else if (name == "bg")
@@ -876,7 +876,7 @@ private:
 static void Help(char *argv0)
 {
     std::cout
-    << "RCBrowser - A file browser designed to be used with a lirc remote contoller.\n"
+    << "RC Launcher - A file browser designed to be used with a lirc remote contoller.\n"
     << "Copyright (c) 2011: Rodrigo Rivas Costa <rodrigorivascosta@gmail.com>\n"
     << "\n"
     << "This program comes with NO WARRANTY, to the extent permitted by law. You\n"
@@ -890,7 +890,7 @@ static void Help(char *argv0)
     << "\t    default one, usually ~/.lircrc.\n"
     << "\t-c <config-file>\n"
     << "\t    Use this configuration file instead of the default one, which\n"
-    << "\t    is (~/.rcbrowser).\n"
+    << "\t    is (~/.rclauncher).\n"
     << std::endl;
 }
 
@@ -902,7 +902,7 @@ int main(int argc, char **argv)
     if (!home)
         home = ".";
 
-    std::string configFile = std::string(home) +  "/.rcbrowser";
+    std::string configFile = std::string(home) +  "/.rclauncher";
     std::string lircFile;
 
     int op;
