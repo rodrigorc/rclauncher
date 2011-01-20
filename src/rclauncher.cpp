@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 #include <iostream>
+#include <algorithm>
 
 #include "miglib/migtk.h"
 #include "miglib/migtkconn.h"

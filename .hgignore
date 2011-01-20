@@ -5,6 +5,5 @@ Makefile\.in$
 ^debug
 ^release
 ^configure$
-^util$
 ^config\.h\.in$
 \.swp$
