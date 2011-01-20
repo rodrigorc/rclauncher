@@ -25,6 +25,8 @@
 
 using namespace miglib;
 
+bool g_verbose = false;
+
 struct ILircClient
 {
     virtual void OnLircCommand(const char *cmd) =0;
@@ -69,7 +71,8 @@ gboolean LircClient::OnIo(GIOChannel *io, GIOCondition cond)
     char *code, *cmd;
     while (lirc_nextcode(&code) == 0 && code != NULL)
     {
-        std::cout << "Code: " << code << std::endl;
+        if (g_verbose)
+            std::cout << "Code: " << code << std::endl;
         while (lirc_code2char(m_cfg, code, &cmd) == 0 && cmd != NULL)
         {
             m_cli->OnLircCommand(cmd);
@@ -141,7 +144,8 @@ struct DirEntry
             return true;
         if (!p1 && p2)
             return false;
-        return name < o.name;
+        int r = strcoll(name.c_str(), o.name.c_str());
+        return r < 0;
     }
 };
 
@@ -159,7 +163,7 @@ static void list_dir(const std::string &path, std::vector<DirEntry> &files)
     {
         enum { T_Other, T_Dir, T_File } type = T_Other;
 #ifdef _DIRENT_HAVE_D_TYPE
-        if (entry->d_type != DT_UNKNOWN)
+        if (entry->d_type != DT_UNKNOWN && entry->d_type != DT_LNK)
         {
             type = entry->d_type == DT_DIR? T_Dir : 
                    entry->d_type == DT_REG? T_File : 
@@ -225,8 +229,8 @@ struct GraphicOptions
 
     GraphicOptions()
     {
-        descFont = "DejaVu Sans 24";
-        descFontTitle = "DejaVu Sans Bold 40 ";
+        descFont = "Sans 24";
+        descFontTitle = "Sans Bold 40";
         colorFg.r = colorFg.g = colorFg.b = 1;
         colorBg.r = colorBg.g = colorBg.b = 0;
         colorScroll.r = colorScroll.g = colorScroll.b = 0.75;
@@ -267,7 +271,7 @@ private:
     GtkDrawingAreaPtr m_draw;
     LircClient m_lirc;
     std::string m_cwd;
-    int m_lineSel, m_firstLine;
+    int m_lineSel, m_firstLine, m_nLines;
     std::vector<DirEntry> m_files;
     GPid m_childPid;
     std::string m_childText;
@@ -282,7 +286,7 @@ private:
     }
     gboolean OnDrawExpose(GtkWidget *w, GdkEventExpose *e);
     gboolean OnDrawKey(GtkWidget *w, GdkEventKey *e);
-    void Move(bool down);
+    void Move(int inc);
     void Select(bool onlyDir);
     void Back();
     void ChangePath(const std::string &path, bool findFav = true);
@@ -327,11 +331,19 @@ gboolean MainWnd::OnDrawKey(GtkWidget *w, GdkEventKey *e)
     {
     case GDK_KEY_Up:
     case GDK_KEY_KP_Up:
-        Move(false);
+        Move(-1);
         break;
     case GDK_KEY_Down:
     case GDK_KEY_KP_Down:
-        Move(true);
+        Move(1);
+        break;
+    case GDK_KEY_Page_Up:
+    case GDK_KEY_KP_Page_Up:
+        Move(-m_nLines);
+        break;
+    case GDK_KEY_Page_Down:
+    case GDK_KEY_KP_Page_Down:
+        Move(m_nLines);
         break;
     case GDK_KEY_Left:
     case GDK_KEY_KP_Left:
@@ -396,20 +408,13 @@ gboolean MainWnd::OnDrawKey(GtkWidget *w, GdkEventKey *e)
     return TRUE;
 }
 
-void MainWnd::Move(bool down)
+void MainWnd::Move(int inc)
 {
-    if (down)
-    {
-        ++m_lineSel;
-        if (m_lineSel >= static_cast<int>(m_files.size()))
-            m_lineSel = m_files.size() - 1;
-    }
-    else
-    {
-        --m_lineSel;
-        if (m_lineSel < 0)
-            m_lineSel = 0;
-    }
+    m_lineSel += inc;
+    if (m_lineSel >= static_cast<int>(m_files.size()))
+        m_lineSel = m_files.size() - 1;
+    else if (m_lineSel < 0)
+        m_lineSel = 0;
     Redraw();
 }
 
@@ -468,6 +473,7 @@ void MainWnd::ChangePath(const std::string &path, bool findFav /*=true*/)
 
     list_dir(m_cwd, m_files);
     m_lineSel = m_firstLine = 0;
+    m_nLines = 1;
 
     if (findFav)
     {
@@ -505,15 +511,18 @@ bool MainWnd::ChangeFavorite(int nfav)
 void MainWnd::Open(const std::string &path)
 {
     std::string fullPath = m_cwd + "/" + path;
-    //std::cout << "Run " << fullPath << std::endl;
+    if (g_verbose)
+        std::cout << "Run " << fullPath << std::endl;
 
     FileAssoc *assoc = FileAssoc::Match(path);
     if (!assoc)
     {
-        //std::cout << "No assoc!"<< std::endl;
+        if (g_verbose)
+            std::cout << "No assoc!"<< std::endl;
         return;
     }
-    std::cout << "Assoc:";
+    if (g_verbose)
+        std::cout << "Assoc:";
 
     std::vector<const char *> args;
     for (size_t i = 0; i < assoc->args.size(); ++i)
@@ -523,9 +532,11 @@ void MainWnd::Open(const std::string &path)
             args.push_back(fullPath.c_str());
         else
             args.push_back(arg.c_str());
-        std::cout << " " << args.back() ;
+        if (g_verbose)
+            std::cout << " " << args.back() ;
     }
-    std::cout<< std::endl;
+    if (g_verbose)
+        std::cout<< std::endl;
     args.push_back(NULL);
     if (gdk_spawn_on_screen(gdk_screen_get_default(), NULL, const_cast<char**>(args.data()), NULL, 
                 GSpawnFlags(G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD), 
@@ -540,7 +551,8 @@ void MainWnd::Open(const std::string &path)
 
 void MainWnd::OnChildWatch(GPid pid, gint status)
 {
-    //std::cout << "Finish " << pid << ": " << status << std::endl;
+    if (g_verbose)
+        std::cout << "Finish " << pid << ": " << status << std::endl;
     if (m_childPid == pid)
     {
         m_childPid = 0;
@@ -585,8 +597,8 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
     double scrollW = 20;
 
     double szH = size.height - (marginY1 + marginY2), szW = size.width - (marginX1 + marginX2 + scrollW);
-    int nLines = int(szH / lineH);
-    szH = nLines * lineH;
+    m_nLines = int(szH / lineH);
+    szH = m_nLines * lineH;
     marginY2 = size.height - (marginY1 + szH);
 
     g_options.gr.colorFg.set_source(cr);
@@ -600,13 +612,13 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
 
     if (m_lineSel < m_firstLine)
         m_firstLine = m_lineSel;
-    if (m_lineSel >= m_firstLine + nLines)
-        m_firstLine = m_lineSel - nLines + 1;
+    if (m_lineSel >= m_firstLine + m_nLines)
+        m_firstLine = m_lineSel - m_nLines + 1;
 
-    if (static_cast<int>(m_files.size()) > nLines)
+    if (static_cast<int>(m_files.size()) > m_nLines)
     {
         double thumbY = m_firstLine * szH / m_files.size();
-        double thumbH = nLines * szH / m_files.size();
+        double thumbH = m_nLines * szH / m_files.size();
         g_options.gr.colorScroll.set_source(cr);
         cairo_rectangle(cr, szW, thumbY, scrollW, thumbH);
         cairo_fill(cr);
@@ -623,9 +635,7 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
     cairo_rectangle(cr, szW, 0, scrollW, szH);
     cairo_stroke(cr);
 
-    //std::cout << "S: " << m_lineSel << "  F: " << m_firstLine << "    N: " << nLines << std::endl;
-    
-    for (size_t nLine = m_firstLine; nLine < m_files.size() && static_cast<int>(nLine) < m_firstLine + nLines; ++nLine)
+    for (size_t nLine = m_firstLine; nLine < m_files.size() && static_cast<int>(nLine) < m_firstLine + m_nLines; ++nLine)
     {
         const DirEntry &entry = m_files[nLine];
 
@@ -739,9 +749,13 @@ void MainWnd::OnLircCommand(const char *cmd)
     }
 
     if (strcmp(cmd, "up") == 0)
-        Move(false);
+        Move(-1);
     else if (strcmp(cmd, "down") == 0)
-        Move(true);
+        Move(1);
+    else if (strcmp(cmd, "pageup") == 0)
+        Move(-m_nLines);
+    else if (strcmp(cmd, "pagedown") == 0)
+        Move(m_nLines);
     else if (strcmp(cmd, "ok") == 0)
         Select(false);
     else if (strcmp(cmd, "right") == 0)
@@ -753,8 +767,11 @@ void MainWnd::OnLircCommand(const char *cmd)
         int nfav = atoi(cmd + 4);
         ChangeFavorite(nfav);
     }
+    else if (strcmp(cmd, "quit") == 0)
+        gtk_main_quit();
     else
-        std::cout << "Unknown cmd: " << cmd << std::endl;
+        if (g_verbose)
+            std::cout << "Unknown cmd: " << cmd << std::endl;
 }
 
 class RCParser : public Simple_XML_Parser
@@ -884,50 +901,62 @@ static void Help(char *argv0)
     << "newer. For more information about these matters, see the file LICENSE.\n"
     << "\n";
     std::cout 
-    << "Usage: " << argv0 << " [-l <lirc-file>] [-c <config-file>]\n"
+    << "Usage: " << argv0 << " [-l <lirc-file>] [-c <config-file>] [-v]\n"
     << "\t-l <lirc-file>\n"
     << "\t    Read lirc command definitions from this file instead of the\n"
     << "\t    default one, usually ~/.lircrc.\n"
     << "\t-c <config-file>\n"
     << "\t    Use this configuration file instead of the default one, which\n"
     << "\t    is (~/.rclauncher).\n"
+    << "\t-v  Verbose: output some information to the terminal.\n"
     << std::endl;
 }
 
 int main(int argc, char **argv)
 {
-    gtk_init(&argc, &argv);
-
-    const char *home = getenv("HOME");
-    if (!home)
-        home = ".";
-
-    std::string configFile = std::string(home) +  "/.rclauncher";
-    std::string lircFile;
-
-    int op;
-    while ((op = getopt(argc, argv, "c:l:")) != -1)
+    try
     {
-        switch (op)
+        gtk_init(&argc, &argv);
+
+        const char *home = getenv("HOME");
+        if (!home)
+            home = ".";
+
+        std::string configFile = std::string(home) +  "/.rclauncher";
+        std::string lircFile;
+
+        int op;
+        while ((op = getopt(argc, argv, "hc:l:v")) != -1)
         {
-        case '?':
-            Help(argv[0]);
-            return 1;
-        case 'c':
-            configFile = optarg;
-            break;
-        case 'l':
-            lircFile = optarg;
-            break;
+            switch (op)
+            {
+            case 'h':
+            case '?':
+                Help(argv[0]);
+                return 1;
+            case 'c':
+                configFile = optarg;
+                break;
+            case 'l':
+                lircFile = optarg;
+                break;
+            case 'v':
+                g_verbose = true;
+            }
         }
+
+        RCParser().ParseFile(configFile);
+
+        MainWnd mainWnd(lircFile);
+
+        gtk_main();
+        return 0;
+    }
+    catch (std::exception &e)
+    {
+        std::cout << argv[0] << ": fatal error: " << e.what() << std::endl;
+        return 1;
     }
 
-    RCParser().ParseFile(configFile);
-
-    MainWnd mainWnd(lircFile);
-
-    gtk_main();
-
-    return 0;
 }
 
