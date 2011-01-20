@@ -1,2 +1,1 @@
-ACLOCAL_AMFLAGS=-I util/auto
 SUBDIRS=src
