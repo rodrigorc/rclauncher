@@ -27,6 +27,8 @@
 using namespace miglib;
 
 bool g_verbose = false;
+bool g_fullscreen = true;
+
 
 struct ILircClient
 {
@@ -316,7 +318,8 @@ MainWnd::MainWnd(const std::string &lircFile)
     gtk_widget_modify_bg(m_draw, GTK_STATE_NORMAL, &black);
     gtk_container_add(m_wnd, m_draw);
 
-    gtk_window_fullscreen(m_wnd);
+    if (g_fullscreen)
+        gtk_window_fullscreen(m_wnd);
     gtk_widget_show_all(m_wnd);
 
     if (!ChangeFavorite(1))
@@ -902,7 +905,7 @@ static void Help(char *argv0)
     << "newer. For more information about these matters, see the file LICENSE.\n"
     << "\n";
     std::cout 
-    << "Usage: " << argv0 << " [-l <lirc-file>] [-c <config-file>] [-v]\n"
+    << "Usage: " << argv0 << " [-l <lirc-file>] [-c <config-file>] [<options>...]\n"
     << "\t-l <lirc-file>\n"
     << "\t    Read lirc command definitions from this file instead of the\n"
     << "\t    default one, usually ~/.lircrc.\n"
@@ -910,6 +913,7 @@ static void Help(char *argv0)
     << "\t    Use this configuration file instead of the default one, which\n"
     << "\t    is (~/.rclauncher).\n"
     << "\t-v  Verbose: output some information to the terminal.\n"
+    << "\t-f  Do not go fullscreen.\n"
     << std::endl;
 }
 
@@ -927,7 +931,7 @@ int main(int argc, char **argv)
         std::string lircFile;
 
         int op;
-        while ((op = getopt(argc, argv, "hc:l:v")) != -1)
+        while ((op = getopt(argc, argv, "hc:l:vf")) != -1)
         {
             switch (op)
             {
@@ -943,6 +947,10 @@ int main(int argc, char **argv)
                 break;
             case 'v':
                 g_verbose = true;
+                break;
+            case 'f':
+                g_fullscreen = false;
+                break;
             }
         }
 
