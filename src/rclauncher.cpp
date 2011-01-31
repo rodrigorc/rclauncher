@@ -590,16 +590,23 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
 
     pango_layout_set_font_description(layout, m_fontTitle);
     pango_layout_get_extents(layout, NULL, &baseRect);
+
+    //titleH is the height of the title area
     double titleH = double(baseRect.height) / PANGO_SCALE;
 
     pango_layout_set_font_description(layout, m_font);
     pango_layout_get_extents(layout, NULL, &baseRect);
+
+    //lineH is the height of a line in the file list
     double lineH = double(baseRect.height) / PANGO_SCALE;
 
+    //Margins to the borders of the window
     double marginX1 = 20, marginX2 = 20;
     double marginY1 = titleH + 10, marginY2 = 20;
+    //scrollW is the width of the scroll bar
     double scrollW = 20;
 
+    //szH,szW are the height and width of the file list view
     double szH = size.height - (marginY1 + marginY2), szW = size.width - (marginX1 + marginX2 + scrollW);
     m_nLines = int(szH / lineH);
     szH = m_nLines * lineH;
@@ -611,7 +618,8 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
     cairo_matrix_t matrix;
     cairo_get_matrix(cr, &matrix);
 
-    const double DELTA_X = 32;
+    //DELTA_X is the width reserved for the icon to the left of the file names
+    const double DELTA_X = (32.0 / 37.0) * lineH;
     pango_layout_set_height(layout, 0);
 
     if (m_lineSel < m_firstLine)
@@ -653,9 +661,10 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
         }
         if (entry.isDir)
         {
-            pango_layout_set_width(layout, (szW - DELTA_X) * PANGO_SCALE);
-            //a small ugly folder
-            cairo_move_to(cr, 6, (lineH - 18) / 2);
+            //A small ugly folder. It is designed with a lineH size of 37, 
+            //so scale it accordingly
+            cairo_scale(cr, lineH / 37.0, lineH / 37.0);
+            cairo_move_to(cr, 6, 10);
             cairo_set_line_width(cr, 4);
             cairo_rel_line_to(cr, 0, 18);
             cairo_rel_line_to(cr, 22, 0);
@@ -666,23 +675,34 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
             //cairo_rectangle(cr, 4, (lineH - 24) / 2, 24, 24);
             cairo_fill_preserve(cr);
             cairo_stroke(cr);
+
+            //And restore the cairo state
             cairo_set_line_width(cr, 2);
+            cairo_scale(cr, 37.0 / lineH, 37.0 / lineH);
+
+            //Move forward to draw the text
             cairo_translate(cr, DELTA_X, 0);
+            pango_layout_set_width(layout, (szW - DELTA_X) * PANGO_SCALE);
         }
         else
         {
-            pango_layout_set_width(layout, (szW - DELTA_X / 4)* PANGO_SCALE);
+            //If no icon, only a quarter of the DELTA_X space is left
+            //Currently only directories have icon, so...
             cairo_translate(cr, DELTA_X / 4, 0);
+            pango_layout_set_width(layout, (szW - DELTA_X / 4) * PANGO_SCALE);
         }
+
+        //The name itself
         pango_cairo_show_layout(cr, layout);
-        if (entry.isDir)
-            cairo_translate(cr, -DELTA_X, 0);
-        else
-            cairo_translate(cr, -DELTA_X / 4, 0);
+
         if (static_cast<int>(nLine) == m_lineSel)
             g_options.gr.colorFg.set_source(cr);
 
-        cairo_translate(cr, 0, lineH);
+        //Advance to the next line
+        if (entry.isDir)
+            cairo_translate(cr, -DELTA_X, lineH);
+        else
+            cairo_translate(cr, -DELTA_X / 4, lineH);
     }
 
     pango_layout_set_font_description(layout, m_fontTitle);
@@ -709,10 +729,10 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
     cairo_translate(cr, 0, -titleH - 4);
     pango_cairo_show_layout(cr, layout);
 
-
     //*******************************
     if (m_childPid != 0)
     {
+        //If a child is running, overlay the name of the file on top of everything
         double marginChildW = 25, marginChildH = 25;
         pango_layout_set_text(layout, m_childText.data(), m_childText.size());
 
