@@ -4,11 +4,15 @@
 //#define MIGTK_XXX_?(obj, cls, fun, ptr)
 //    MIGLIB_CONNECT_?(obj, "?", ?, GtkXXX*, ?, cls, fun, ptr)
 
+#if GTK_MAJOR_VERSION < 3
 //GtkObject
 #define MIGTK_OBJECT_destroy(obj, cls, fun, ptr) \
     MIGLIB_CONNECT_1(obj, "destroy", void, GtkObject*, cls, fun, ptr)
+#endif
 
 //GtkWidget
+#define MIGTK_WIDGET_destroy(obj, cls, fun, ptr) \
+    MIGLIB_CONNECT_1(obj, "destroy", void, GtkWidget*, cls, fun, ptr)
 #define MIGTK_WIDGET_button_press_event(obj, cls, fun, ptr) \
     MIGLIB_CONNECT_2(obj, "button-press-event", gboolean, GtkWidget*, GdkEventButton*, cls, fun, ptr)
 #define MIGTK_WIDGET_button_release_event(obj, cls, fun, ptr) \
@@ -49,8 +53,6 @@
     MIGLIB_CONNECT_2(obj, "enter-notify-event", gboolean, GtkWidget*, GdkEventCrossing*, cls, fun, ptr)
 #define MIGTK_WIDGET_event(obj, cls, fun, ptr) \
     MIGLIB_CONNECT_2(obj, "event", gboolean, GtkWidget*, GdkEvent*, cls, fun, ptr)
-#define MIGTK_WIDGET_expose_event(obj, cls, fun, ptr) \
-    MIGLIB_CONNECT_2(obj, "expose-event", gboolean, GtkWidget*, GdkEventExpose*, cls, fun, ptr)
 #define MIGTK_WIDGET_focus(obj, cls, fun, ptr) \
     MIGLIB_CONNECT_2(obj, "focus", gboolean, GtkWidget*, GtkDirectionType, cls, fun, ptr)
 #define MIGTK_WIDGET_focus_in_event(obj, cls, fun, ptr) \
@@ -81,8 +83,6 @@
     MIGLIB_CONNECT_2(obj, "mnemonic-activate", gboolean, GtkWidget*, gboolean, cls, fun, ptr)
 #define MIGTK_WIDGET_motion_notify_event(obj, cls, fun, ptr) \
     MIGLIB_CONNECT_2(obj, "motion-notify-event", gboolean, GtkWidget*, GdkEventMotion*, cls, fun, ptr)
-#define MIGTK_WIDGET_no_expose_event(obj, cls, fun, ptr) \
-    MIGLIB_CONNECT_2(obj, "no-expose-event", gboolean, GtkWidget*, GdkEventAny*, cls, fun, ptr)
 #define MIGTK_WIDGET_parent_set(obj, cls, fun, ptr) \
     MIGLIB_CONNECT_2(obj, "parent-set", void, GtkWidget*, GtkWidget*, cls, fun, ptr)
 #define MIGTK_WIDGET_popup_menu(obj, cls, fun, ptr) \
@@ -131,6 +131,16 @@
     MIGLIB_CONNECT_2(obj, "visibility-notify-event", gboolean, GtkWidget*, GdkEventVisibility*, cls, fun, ptr)
 #define MIGTK_WIDGET_window_state_event(obj, cls, fun, ptr) \
     MIGLIB_CONNECT_2(obj, "window-state-event", gboolean, GtkWidget*, GdkEventWindowState*, cls, fun, ptr)
+
+#if GTK_MAJOR_VERSION < 3
+#define MIGTK_WIDGET_expose_event(obj, cls, fun, ptr) \
+    MIGLIB_CONNECT_2(obj, "expose-event", gboolean, GtkWidget*, GdkEventExpose*, cls, fun, ptr)
+#define MIGTK_WIDGET_no_expose_event(obj, cls, fun, ptr) \
+    MIGLIB_CONNECT_2(obj, "no-expose-event", gboolean, GtkWidget*, GdkEventAny*, cls, fun, ptr)
+#else
+#define MIGTK_WIDGET_draw(obj, cls, fun, ptr) \
+    MIGLIB_CONNECT_2(obj, "draw", gboolean, GtkWidget*, cairo_t*, cls, fun, ptr)
+#endif
 
 //GtkContainer
 #define MIGTK_CONTAINER_add(obj, cls, fun, ptr) \

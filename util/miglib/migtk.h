@@ -62,43 +62,44 @@ struct GdkThreadUnlock
 
 /////////////////////////////////////
 //Pointers
+//This GtkPtrCast traits is used to manage the "destroy" signal
+//and the floating reference
 
-struct GtkPtrFollow
+template <typename T> class GtkPtrCast : public GPtrCast<T>
 {
-    void **pp;
+private:
     guint id;
-
-    GtkPtrFollow()
-        :pp(0), id(0)
-    {}
-    static void OnDestroy(void *obj, gpointer data)
+    static void OnDestroy(gpointer obj, gpointer data)
     {
-        GtkPtrFollow *that = static_cast<GtkPtrFollow *>(data);
-        void **pp2 = that->pp;
-        that->Unfollow(obj);
+        //assert(this->m_ptr == obj);
+        GtkPtrCast *that = static_cast<GtkPtrCast*>(data);
+        that->Unfollow();
+        that->m_ptr = NULL;
         g_object_unref(obj);
-        *pp2 = 0;
     }
-    void FollowInit(void *&ptr)
+protected:
+    GtkPtrCast()
+        :id(0)
+    {}
+    void Init()
     {
-        g_object_ref_sink(G_OBJECT(ptr));
-        Follow(ptr);
+        g_object_ref_sink(this->m_ptr);
     }
-    void Follow(void *&ptr)
+    void Follow()
     {
-        pp = &ptr;
-        id = g_signal_connect(ptr, "destroy", GCallback(OnDestroy), this);
+        id = g_signal_connect(this->m_ptr, "destroy", GCallback(OnDestroy), this);
     }
-    void Unfollow(void *&ptr)
+    void Unfollow()
     {
-        g_signal_handler_disconnect(ptr, id);
-        pp = 0;
-        id = 0;
+        if (id != 0)
+        {
+            g_signal_handler_disconnect(this->m_ptr, id);
+            id = 0;
+        }
     }
-    ~GtkPtrFollow()
+    ~GtkPtrCast()
     {
-        if (pp)
-            Unfollow(*pp);
+        Unfollow();
     }
 };
 
@@ -107,81 +108,174 @@ struct GtkPtrFollow
 /////////////////////////////////////
 //Class hierarchy
 
-#define MIGTK_DECL_EX(x, nm) namespace miglib { typedef GPtr< x, GPtrTraits< x >, GtkPtrFollow > nm##Ptr; }
+#define MIGTK_DECL_EX(x, nm) namespace miglib { typedef GPtr< x, GObjectPtrTraits, GtkPtrCast<x> > nm##Ptr; \
+    typedef GPtr< x, GNoMagicPtrTraits > nm##PtrNM; }
 #define MIGTK_DECL(x) MIGTK_DECL_EX(x,x)
 
-#define MIGTK_SUBCLASS(sub,cls,chk) MIGLIB_SUBCLASS_EX(sub,cls,chk) \
+#define MIGTK_SUBCLASS(sub,cls,type) MIGLIB_SUBCLASS_EX(sub,cls,type) \
     MIGTK_DECL(sub)
 
-MIGTK_SUBCLASS(GtkObject, GObject, GTK_OBJECT)
-MIGTK_SUBCLASS(GtkWidget, GtkObject, GTK_WIDGET)
-MIGTK_SUBCLASS(GtkContainer, GtkWidget, GTK_CONTAINER)
-MIGTK_SUBCLASS(GtkBin, GtkContainer, GTK_BIN)
-MIGTK_SUBCLASS(GtkWindow, GtkBin, GTK_WINDOW)
-MIGTK_SUBCLASS(GtkScrolledWindow, GtkBin, GTK_SCROLLED_WINDOW)
-MIGTK_SUBCLASS(GtkDialog, GtkWindow, GTK_DIALOG)
-MIGTK_SUBCLASS(GtkMessageDialog, GtkDialog, GTK_MESSAGE_DIALOG)
-MIGTK_SUBCLASS(GtkTreeView, GtkContainer, GTK_TREE_VIEW)
-MIGTK_SUBCLASS(GtkTreeViewColumn, GtkObject, GTK_TREE_VIEW_COLUMN)
-MIGTK_SUBCLASS(GtkBox, GtkContainer, GTK_BOX)
-MIGTK_SUBCLASS(GtkVBox, GtkBox, GTK_VBOX)
-MIGTK_SUBCLASS(GtkHBox, GtkBox, GTK_HBOX)
-MIGTK_SUBCLASS(GtkButtonBox, GtkBox, GTK_BUTTON_BOX)
-MIGTK_SUBCLASS(GtkHButtonBox, GtkButtonBox, GTK_HBUTTON_BOX)
-MIGTK_SUBCLASS(GtkVButtonBox, GtkButtonBox, GTK_VBUTTON_BOX)
-MIGTK_SUBCLASS(GtkPaned, GtkContainer, GTK_PANED)
-MIGTK_SUBCLASS(GtkHPaned, GtkPaned, GTK_HPANED)
-MIGTK_SUBCLASS(GtkVPaned, GtkPaned, GTK_VPANED)
-MIGTK_SUBCLASS(GtkDrawingArea, GtkWidget, GTK_DRAWING_AREA)
-MIGTK_SUBCLASS(GtkCellRenderer, GtkObject, GTK_CELL_RENDERER)
-MIGTK_SUBCLASS(GtkCellRendererText, GtkCellRenderer, GTK_CELL_RENDERER_TEXT)
-MIGTK_SUBCLASS(GtkCellRendererPixbuf, GtkCellRenderer, GTK_CELL_RENDERER_PIXBUF)
-MIGTK_SUBCLASS(GtkCellRendererProgress, GtkCellRenderer, GTK_CELL_RENDERER_PROGRESS)
-MIGTK_SUBCLASS(GtkCellRendererToggle, GtkCellRenderer, GTK_CELL_RENDERER_TOGGLE)
-MIGTK_SUBCLASS(GtkCellRendererAccel, GtkCellRendererText, GTK_CELL_RENDERER_ACCEL)
-MIGTK_SUBCLASS(GtkCellRendererCombo, GtkCellRendererText, GTK_CELL_RENDERER_COMBO)
-MIGTK_SUBCLASS(GtkCellRendererSpin, GtkCellRendererText, GTK_CELL_RENDERER_SPIN)
-MIGTK_SUBCLASS(GtkMenuShell, GtkContainer, GTK_MENU_SHELL)
-MIGTK_SUBCLASS(GtkMenu, GtkMenuShell, GTK_MENU)
-MIGTK_SUBCLASS(GtkMenuBar, GtkMenuShell, GTK_MENU_BAR)
-MIGTK_SUBCLASS(GtkToolbar, GtkContainer, GTK_TOOLBAR)
-MIGTK_SUBCLASS(GtkItem, GtkBin, GTK_ITEM)
-MIGTK_SUBCLASS(GtkMenuItem, GtkItem, GTK_MENU_ITEM)
-MIGTK_SUBCLASS(GtkButton, GtkBin, GTK_BUTTON)
-MIGTK_SUBCLASS(GtkMisc, GtkWidget, GTK_MISC)
-MIGTK_SUBCLASS(GtkLabel, GtkMisc, GTK_LABEL)
-MIGTK_SUBCLASS(GtkFrame, GtkBin, GTK_FRAME)
-MIGTK_SUBCLASS(GtkAspectFrame, GtkFrame, GTK_ASPECT_FRAME)
-MIGTK_SUBCLASS(GtkEntry, GtkWidget, GTK_ENTRY)
-MIGTK_SUBCLASS(GtkTextView, GtkContainer, GTK_TEXT_VIEW)
-MIGTK_SUBCLASS(GtkTable, GtkContainer, GTK_TABLE)
-MIGTK_SUBCLASS(GtkSocket, GtkContainer, GTK_SOCKET)
-MIGTK_SUBCLASS(GtkPlug, GtkWindow, GTK_PLUG)
-MIGTK_SUBCLASS(GtkLayout, GtkContainer, GTK_LAYOUT)
-MIGTK_SUBCLASS(GtkImage, GtkMisc, GTK_IMAGE)
-MIGTK_SUBCLASS(GtkEventBox, GtkBin, GTK_EVENT_BOX)
+//Base classes
+#if GTK_MAJOR_VERSION < 3
+MIGTK_SUBCLASS(GtkObject, GInitiallyUnowned, GTK_TYPE_OBJECT)
+MIGTK_SUBCLASS(GtkWidget, GtkObject, GTK_TYPE_WIDGET)
+#else
+MIGTK_SUBCLASS(GtkWidget, GInitiallyUnowned, GTK_TYPE_WIDGET)
+#endif
+
+//Of GtkWidget
+MIGTK_SUBCLASS(GtkContainer, GtkWidget, GTK_TYPE_CONTAINER)
+MIGTK_SUBCLASS(GtkMisc, GtkWidget, GTK_TYPE_MISC)
+MIGTK_SUBCLASS(GtkCalendar, GtkWidget, GTK_TYPE_CALENDAR)
+MIGTK_SUBCLASS(GtkCellView, GtkWidget, GTK_TYPE_CELL_VIEW)
+MIGTK_SUBCLASS(GtkDrawingArea, GtkWidget, GTK_TYPE_DRAWING_AREA)
+MIGTK_SUBCLASS(GtkEntry, GtkWidget, GTK_TYPE_ENTRY)
+MIGTK_SUBCLASS(GtkRange, GtkWidget, GTK_TYPE_RANGE)
+MIGTK_SUBCLASS(GtkSeparator, GtkWidget, GTK_TYPE_SEPARATOR)
+MIGTK_SUBCLASS(GtkHSV, GtkWidget, GTK_TYPE_HSV)
+MIGTK_SUBCLASS(GtkInvisible, GtkWidget, GTK_TYPE_INVISIBLE)
+//In GTK+2 GtkProgressBar is really a subclass of GtkProgress, but the latter
+//is deprecated, so it is just ommitted
+MIGTK_SUBCLASS(GtkProgressBar, GtkWidget, GTK_TYPE_PROGRESS_BAR)
+
+#if  GTK_MAJOR_VERSION >= 3
+MIGTK_SUBCLASS(GtkSpinner, GtkWidget, GTK_TYPE_SPINNER)
+MIGTK_SUBCLASS(GtkSwitch, GtkWidget, GTK_TYPE_SWITCH)
+#endif
+
+//Of GtkContainer
+MIGTK_SUBCLASS(GtkBin, GtkContainer, GTK_TYPE_BIN)
+MIGTK_SUBCLASS(GtkBox, GtkContainer, GTK_TYPE_BOX)
+MIGTK_SUBCLASS(GtkFixed, GtkContainer, GTK_TYPE_FIXED)
+MIGTK_SUBCLASS(GtkPaned, GtkContainer, GTK_TYPE_PANED)
+MIGTK_SUBCLASS(GtkIconView, GtkContainer, GTK_TYPE_ICON_VIEW)
+MIGTK_SUBCLASS(GtkLayout, GtkContainer, GTK_TYPE_LAYOUT)
+MIGTK_SUBCLASS(GtkMenuShell, GtkContainer, GTK_TYPE_MENU_SHELL)
+MIGTK_SUBCLASS(GtkNotebook, GtkContainer, GTK_TYPE_NOTEBOOK)
+//MIGTK_SUBCLASS(GtkSocket, GtkContainer, GTK_TYPE_SOCKET)
+MIGTK_SUBCLASS(GtkTable, GtkContainer, GTK_TYPE_TABLE)
+MIGTK_SUBCLASS(GtkTextView, GtkContainer, GTK_TYPE_TEXT_VIEW)
+MIGTK_SUBCLASS(GtkToolbar, GtkContainer, GTK_TYPE_TOOLBAR)
+MIGTK_SUBCLASS(GtkToolItemGroup, GtkContainer, GTK_TYPE_TOOL_ITEM_GROUP)
+MIGTK_SUBCLASS(GtkToolPalette, GtkContainer, GTK_TYPE_TOOL_PALETTE)
+MIGTK_SUBCLASS(GtkTreeView, GtkContainer, GTK_TYPE_TREE_VIEW)
+#if  GTK_MAJOR_VERSION >= 3
+MIGTK_SUBCLASS(GtkGrid, GtkContainer, GTK_TYPE_GRID)
+#endif
+
+//Of GtkBin
+MIGTK_SUBCLASS(GtkWindow, GtkBin, GTK_TYPE_WINDOW)
+MIGTK_SUBCLASS(GtkAlignment, GtkBin, GTK_TYPE_ALIGNMENT)
+MIGTK_SUBCLASS(GtkFrame, GtkBin, GTK_TYPE_FRAME)
+MIGTK_SUBCLASS(GtkButton, GtkBin, GTK_TYPE_BUTTON)
+MIGTK_SUBCLASS(GtkComboBox, GtkBin, GTK_TYPE_COMBO_BOX)
+MIGTK_SUBCLASS(GtkEventBox, GtkBin, GTK_TYPE_EVENT_BOX)
+MIGTK_SUBCLASS(GtkExpander, GtkBin, GTK_TYPE_EXPANDER)
+MIGTK_SUBCLASS(GtkHandleBox, GtkBin, GTK_TYPE_HANDLE_BOX)
+MIGTK_SUBCLASS(GtkToolItem, GtkBin, GTK_TYPE_TOOL_ITEM)
+MIGTK_SUBCLASS(GtkScrolledWindow, GtkBin, GTK_TYPE_SCROLLED_WINDOW)
+MIGTK_SUBCLASS(GtkViewport, GtkBin, GTK_TYPE_VIEWPORT)
+#if  GTK_MAJOR_VERSION < 3
+MIGTK_SUBCLASS(GtkItem, GtkBin, GTK_TYPE_ITEM)
+MIGTK_SUBCLASS(GtkMenuItem, GtkItem, GTK_TYPE_MENU_ITEM)
+#else
+MIGTK_SUBCLASS(GtkMenuItem, GtkBin, GTK_TYPE_MENU_ITEM)
+#endif
+
+//Of GtkWindow
+MIGTK_SUBCLASS(GtkDialog, GtkWindow, GTK_TYPE_DIALOG)
+MIGTK_SUBCLASS(GtkAssistant, GtkWindow, GTK_TYPE_ASSISTANT)
+MIGTK_SUBCLASS(GtkOffscreenWindow, GtkWindow, GTK_TYPE_OFFSCREEN_WINDOW)
+//MIGTK_SUBCLASS(GtkPlug, GtkWindow, GTK_TYPE_PLUG)
+
+//Of GtkDialog
+MIGTK_SUBCLASS(GtkAboutDialog, GtkDialog, GTK_TYPE_ABOUT_DIALOG)
+MIGTK_SUBCLASS(GtkColorSelectionDialog, GtkDialog, GTK_TYPE_COLOR_SELECTION_DIALOG)
+MIGTK_SUBCLASS(GtkFileChooserDialog, GtkDialog, GTK_TYPE_FILE_CHOOSER_DIALOG)
+MIGTK_SUBCLASS(GtkFontSelectionDialog, GtkDialog, GTK_TYPE_FONT_SELECTION_DIALOG)
+MIGTK_SUBCLASS(GtkMessageDialog, GtkDialog, GTK_TYPE_MESSAGE_DIALOG)
+//MIGTK_SUBCLASS(GtkPageSetupUnixDialog, GtkDialog, GTK_TYPE_PAGE_SETUP_UNIX_DIALOG)
+//MIGTK_SUBCLASS(GtkPrintUnixDialog, GtkDialog, GTK_TYPE_PRINT_UNIX_DIALOG)
+MIGTK_SUBCLASS(GtkRecentChooserDialog, GtkDialog, GTK_TYPE_RECENT_CHOOSER_DIALOG)
+#if GTK_MAJOR_VERSION >= 3
+MIGTK_SUBCLASS(GtkAppChooserDialog, GtkDialog, GTK_TYPE_APP_CHOOSER_DIALOG)
+#endif
+
+//Of GtkBox
+MIGTK_SUBCLASS(GtkVBox, GtkBox, GTK_TYPE_VBOX)
+MIGTK_SUBCLASS(GtkHBox, GtkBox, GTK_TYPE_HBOX)
+MIGTK_SUBCLASS(GtkButtonBox, GtkBox, GTK_TYPE_BUTTON_BOX)
+MIGTK_SUBCLASS(GtkHButtonBox, GtkButtonBox, GTK_TYPE_HBUTTON_BOX)
+MIGTK_SUBCLASS(GtkVButtonBox, GtkButtonBox, GTK_TYPE_VBUTTON_BOX)
+
+//Of GtkButton
+MIGTK_SUBCLASS(GtkToggleButton, GtkButton, GTK_TYPE_TOGGLE_BUTTON)
+MIGTK_SUBCLASS(GtkCheckButton, GtkToggleButton, GTK_TYPE_CHECK_BUTTON)
+MIGTK_SUBCLASS(GtkRadioButton, GtkCheckButton, GTK_TYPE_RADIO_BUTTON)
+MIGTK_SUBCLASS(GtkColorButton, GtkButton, GTK_TYPE_COLOR_BUTTON)
+MIGTK_SUBCLASS(GtkFontButton, GtkButton, GTK_TYPE_FONT_BUTTON)
+MIGTK_SUBCLASS(GtkLinkButton, GtkButton, GTK_TYPE_LINK_BUTTON)
+MIGTK_SUBCLASS(GtkScaleButton, GtkButton, GTK_TYPE_SCALE_BUTTON)
+MIGTK_SUBCLASS(GtkVolumeButton, GtkScaleButton, GTK_TYPE_VOLUME_BUTTON)
+
+//Of GtkMisc
+MIGTK_SUBCLASS(GtkLabel, GtkMisc, GTK_TYPE_LABEL)
+MIGTK_SUBCLASS(GtkArrow, GtkMisc, GTK_TYPE_ARROW)
+MIGTK_SUBCLASS(GtkImage, GtkMisc, GTK_TYPE_IMAGE)
+MIGTK_SUBCLASS(GtkAccelLabel, GtkLabel, GTK_TYPE_IMAGE)
+
+//Other
+MIGTK_SUBCLASS(GtkAspectFrame, GtkFrame, GTK_TYPE_ASPECT_FRAME)
+MIGTK_SUBCLASS(GtkHPaned, GtkPaned, GTK_TYPE_HPANED)
+MIGTK_SUBCLASS(GtkVPaned, GtkPaned, GTK_TYPE_VPANED)
+MIGTK_SUBCLASS(GtkMenu, GtkMenuShell, GTK_TYPE_MENU)
+MIGTK_SUBCLASS(GtkMenuBar, GtkMenuShell, GTK_TYPE_MENU_BAR)
+
+#if GTK_MAJOR_VERSION < 3
+MIGTK_SUBCLASS(GtkTreeViewColumn, GtkObject, GTK_TYPE_TREE_VIEW_COLUMN)
+MIGTK_SUBCLASS(GtkCellRenderer, GtkObject, GTK_TYPE_CELL_RENDERER)
+MIGTK_SUBCLASS(GtkCellRendererText, GtkCellRenderer, GTK_TYPE_CELL_RENDERER_TEXT)
+MIGTK_SUBCLASS(GtkCellRendererPixbuf, GtkCellRenderer, GTK_TYPE_CELL_RENDERER_PIXBUF)
+MIGTK_SUBCLASS(GtkCellRendererProgress, GtkCellRenderer, GTK_TYPE_CELL_RENDERER_PROGRESS)
+MIGTK_SUBCLASS(GtkCellRendererToggle, GtkCellRenderer, GTK_TYPE_CELL_RENDERER_TOGGLE)
+MIGTK_SUBCLASS(GtkCellRendererAccel, GtkCellRendererText, GTK_TYPE_CELL_RENDERER_ACCEL)
+MIGTK_SUBCLASS(GtkCellRendererCombo, GtkCellRendererText, GTK_TYPE_CELL_RENDERER_COMBO)
+MIGTK_SUBCLASS(GtkCellRendererSpin, GtkCellRendererText, GTK_TYPE_CELL_RENDERER_SPIN)
+#else
+MIGIU_SUBCLASS(GtkTreeViewColumn, GInitiallyUnowned, GTK_TYPE_TREE_VIEW_COLUMN)
+MIGIU_SUBCLASS(GtkCellRenderer, GInitiallyUnowned, GTK_TYPE_CELL_RENDERER)
+MIGIU_SUBCLASS(GtkCellRendererText, GtkCellRenderer, GTK_TYPE_CELL_RENDERER_TEXT)
+MIGIU_SUBCLASS(GtkCellRendererPixbuf, GtkCellRenderer, GTK_TYPE_CELL_RENDERER_PIXBUF)
+MIGIU_SUBCLASS(GtkCellRendererProgress, GtkCellRenderer, GTK_TYPE_CELL_RENDERER_PROGRESS)
+MIGIU_SUBCLASS(GtkCellRendererToggle, GtkCellRenderer, GTK_TYPE_CELL_RENDERER_TOGGLE)
+MIGIU_SUBCLASS(GtkCellRendererAccel, GtkCellRendererText, GTK_TYPE_CELL_RENDERER_ACCEL)
+MIGIU_SUBCLASS(GtkCellRendererCombo, GtkCellRendererText, GTK_TYPE_CELL_RENDERER_COMBO)
+MIGIU_SUBCLASS(GtkCellRendererSpin, GtkCellRendererText, GTK_TYPE_CELL_RENDERER_SPIN)
+#endif
 
 ///////////////////////////////////////
 // Subclasses of GObject, not GtkObject
 
 //Gtk
-MIGLIB_SUBCLASS(GtkTextBuffer, GObject, GTK_TEXT_BUFFER)
-MIGLIB_SUBCLASS_ITF_2(GtkListStore, GObject, GtkTreeModel, GtkTreeSortable, GTK_LIST_STORE)
-MIGLIB_SUBCLASS_ITF_2(GtkTreeStore, GObject, GtkTreeModel, GtkTreeSortable, GTK_TREE_STORE)
-MIGLIB_SUBCLASS(GtkTreeSelection, GObject, GTK_TREE_SELECTION)
-MIGLIB_SUBCLASS(GtkStatusIcon, GObject, GTK_STATUS_ICON)
-MIGLIB_SUBCLASS(GtkUIManager, GObject, GTK_UI_MANAGER)
-MIGLIB_SUBCLASS(GtkActionGroup, GObject, GTK_ACTION_GROUP)
-MIGLIB_SUBCLASS(GtkIconFactory, GObject, GTK_ICON_FACTORY)
-MIGLIB_SUBCLASS(GtkSizeGroup, GObject, GTK_SIZE_GROUP)
-MIGLIB_SUBCLASS(GtkAction, GObject, GTK_ACTION)
-MIGLIB_SUBCLASS(GtkToggleAction, GtkAction, GTK_TOGGLE_ACTION)
-MIGLIB_SUBCLASS(GtkRadioAction, GtkToggleAction, GTK_RADIO_ACTION)
-MIGLIB_SUBCLASS(GtkBuilder, GtkObject, GTK_BUILDER)
+MIGLIB_SUBCLASS(GtkTextBuffer, GObject, GTK_TYPE_TEXT_BUFFER)
+MIGLIB_SUBCLASS_ITF_2(GtkListStore, GObject, GtkTreeModel, GtkTreeSortable, GTK_TYPE_LIST_STORE)
+MIGLIB_SUBCLASS_ITF_2(GtkTreeStore, GObject, GtkTreeModel, GtkTreeSortable, GTK_TYPE_TREE_STORE)
+MIGLIB_SUBCLASS(GtkTreeSelection, GObject, GTK_TYPE_TREE_SELECTION)
+MIGLIB_SUBCLASS(GtkStatusIcon, GObject, GTK_TYPE_STATUS_ICON)
+MIGLIB_SUBCLASS(GtkUIManager, GObject, GTK_TYPE_UI_MANAGER)
+MIGLIB_SUBCLASS(GtkActionGroup, GObject, GTK_TYPE_ACTION_GROUP)
+MIGLIB_SUBCLASS(GtkIconFactory, GObject, GTK_TYPE_ICON_FACTORY)
+MIGLIB_SUBCLASS(GtkSizeGroup, GObject, GTK_TYPE_SIZE_GROUP)
+MIGLIB_SUBCLASS(GtkAction, GObject, GTK_TYPE_ACTION)
+MIGLIB_SUBCLASS(GtkToggleAction, GtkAction, GTK_TYPE_TOGGLE_ACTION)
+MIGLIB_SUBCLASS(GtkRadioAction, GtkToggleAction, GTK_TYPE_RADIO_ACTION)
+MIGLIB_SUBCLASS(GtkBuilder, GObject, GTK_TYPE_BUILDER)
 
 //Gdk
-MIGLIB_SUBCLASS(GdkPixbuf, GObject, GDK_PIXBUF)
-MIGLIB_SUBCLASS(GdkGC, GObject, GDK_GC)
+MIGLIB_SUBCLASS(GdkPixbuf, GObject, GDK_TYPE_PIXBUF)
+#if GTK_MAJOR_VERSION < 3
+MIGLIB_SUBCLASS(GdkGC, GObject, GDK_TYPE_GC)
+#endif
 
 ///////////////////////////////////////
 // Other pointers without base class
@@ -189,14 +283,14 @@ MIGLIB_SUBCLASS(GdkGC, GObject, GDK_GC)
 namespace miglib
 {
 
-template<> struct GPtrTraits<GdkCursor>
+struct GdkCursorPtrTraits
 {
     static void Ref(GdkCursor *ptr)
     { gdk_cursor_ref(ptr); }
     static void Unref(GdkCursor *ptr)
     { gdk_cursor_unref(ptr); }
 };
-typedef GPtr<GdkCursor> GdkCursorPtr;
+typedef GPtr<GdkCursor, GdkCursorPtrTraits> GdkCursorPtr;
 
 class MiWaitCursor
 {
@@ -207,43 +301,43 @@ public:
     MiWaitCursor(GtkWidget *w, GdkCursorType type=GDK_WATCH)
         :m_widget(w), m_cursor(gdk_cursor_new(type))
     {
-        gdk_window_set_cursor(m_widget->window, m_cursor);
+        gdk_window_set_cursor(gtk_widget_get_window(m_widget), m_cursor);
         gdk_flush();
     }
     MiWaitCursor(GtkWidget *w, GdkCursor *c)
         :m_widget(w), m_cursor(c)
     {
-        gdk_window_set_cursor(m_widget->window, m_cursor);
+        gdk_window_set_cursor(gtk_widget_get_window(m_widget), m_cursor);
         gdk_flush();
     }
     ~MiWaitCursor()
     {
-        gdk_window_set_cursor(m_widget->window, NULL);
+        gdk_window_set_cursor(gtk_widget_get_window(m_widget), NULL);
     }
 };
 
-template<> struct GPtrTraits<GtkIconSet>
+struct GtkIconSetPtrTraits
 {
     static void Ref(GtkIconSet *ptr)
     { gtk_icon_set_ref(ptr); }
     static void Unref(GtkIconSet *ptr)
     { gtk_icon_set_unref(ptr); }
 };
-typedef GPtr<GtkIconSet> GtkIconSetPtr;
+typedef GPtr<GtkIconSet, GtkIconSetPtrTraits> GtkIconSetPtr;
 
-template<> struct GPtrTraits<GtkTreePath>
+struct GtkTreePathPtrTraits
 {
     static void Unref(GtkTreePath *ptr)
     { gtk_tree_path_free(ptr); }
 };
-typedef GPtr<GtkTreePath> GtkTreePathPtr;
+typedef GPtr<GtkTreePath, GtkTreePathPtrTraits> GtkTreePathPtr;
 
-template<> struct GPtrTraits<GtkTreeRowReference>
+struct GtkTreeRowReferencePtrTraits
 {
     static void Unref(GtkTreeRowReference *ptr)
     { gtk_tree_row_reference_free(ptr); }
 };
-typedef GPtr<GtkTreeRowReference> GtkTreeRowReferencePtr;
+typedef GPtr<GtkTreeRowReference, GtkTreeRowReferencePtrTraits> GtkTreeRowReferencePtr;
 
 ////////////////////////////////////
 //Events

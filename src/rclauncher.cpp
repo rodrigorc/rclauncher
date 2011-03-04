@@ -283,11 +283,16 @@ private:
 
     PangoFontDescriptionPtr m_font, m_fontTitle;
 
-    void OnDestroy(GtkObject *w)
+    void OnDestroy(GtkWidget *w)
     {
         gtk_main_quit();
     }
+#if GTK_MAJOR_VERSION < 3
     gboolean OnDrawExpose(GtkWidget *w, GdkEventExpose *e);
+#else
+    gboolean OnDrawDraw(GtkWidget *w, cairo_t *cr);
+#endif
+    void OnDrawCairo(cairo_t *cr, int width, int height);
     gboolean OnDrawKey(GtkWidget *w, GdkEventKey *e);
     void Move(int inc);
     void Select(bool onlyDir);
@@ -308,14 +313,20 @@ MainWnd::MainWnd(const std::string &lircFile)
     :m_lirc(lircFile, this), m_childPid(0), m_isKillable(false), m_favoriteIdx(-1)
 {
     m_wnd.Reset( gtk_window_new(GTK_WINDOW_TOPLEVEL) );
-    MIGTK_OBJECT_destroy(m_wnd, MainWnd, OnDestroy, this);
+    MIGTK_WIDGET_destroy(m_wnd, MainWnd, OnDestroy, this);
 
     m_draw.Reset( gtk_drawing_area_new() );
+#if GTK_MAJOR_VERSION < 3
     MIGTK_WIDGET_expose_event(m_draw, MainWnd, OnDrawExpose, this);
-    gtk_widget_set_can_focus(m_draw, TRUE);
-    MIGTK_WIDGET_key_press_event(m_draw, MainWnd, OnDrawKey, this);
     GdkColor black = {0, 0xFFFF * g_options.gr.colorBg.r, 0xFFFF * g_options.gr.colorBg.g, 0xFFFF * g_options.gr.colorBg.b};
     gtk_widget_modify_bg(m_draw, GTK_STATE_NORMAL, &black);
+#else
+    MIGTK_WIDGET_draw(m_draw, MainWnd, OnDrawDraw, this);
+    GdkRGBA black = {g_options.gr.colorBg.r, g_options.gr.colorBg.g, g_options.gr.colorBg.b, 1.0};
+    gtk_widget_override_background_color(m_draw, GTK_STATE_FLAG_NORMAL, &black);
+#endif
+    gtk_widget_set_can_focus(m_draw, TRUE);
+    MIGTK_WIDGET_key_press_event(m_draw, MainWnd, OnDrawKey, this);
     gtk_container_add(m_wnd, m_draw);
 
     if (g_fullscreen)
@@ -512,6 +523,12 @@ bool MainWnd::ChangeFavorite(int nfav)
     return true;
 }
 
+static void SetupSpawnedEnviron(gpointer data)
+{
+    GCharPtr display( gdk_screen_make_display_name((GdkScreen*)data) );
+    g_setenv("DISPLAY", display, TRUE);
+}
+
 void MainWnd::Open(const std::string &path)
 {
     std::string fullPath = m_cwd + "/" + path;
@@ -540,11 +557,20 @@ void MainWnd::Open(const std::string &path)
             std::cout << " " << args.back() ;
     }
     if (g_verbose)
-        std::cout<< std::endl;
+        std::cout << std::endl;
+    if (args.empty())
+    {
+        //This should not happend, but just in case...
+        if (g_verbose)
+            std::cout << "Empty command!" << std::endl;
+        return;
+    }
+    gboolean res;
     args.push_back(NULL);
-    if (gdk_spawn_on_screen(gdk_screen_get_default(), NULL, const_cast<char**>(args.data()), NULL, 
+    res = g_spawn_async(NULL, const_cast<char**>(args.data()), NULL,
                 GSpawnFlags(G_SPAWN_SEARCH_PATH | G_SPAWN_DO_NOT_REAP_CHILD), 
-                NULL, NULL, &m_childPid, NULL))
+                SetupSpawnedEnviron, gdk_screen_get_default(), &m_childPid, NULL);
+    if (res)
     {
         MIGLIB_CHILD_WATCH_ADD(m_childPid, MainWnd, OnChildWatch, this);
         m_childText = path;
@@ -566,14 +592,28 @@ void MainWnd::OnChildWatch(GPid pid, gint status)
     g_spawn_close_pid(pid);
 }
 
+#if GTK_MAJOR_VERSION < 3
 gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
 {
     GtkAllocation size;
     gtk_widget_get_allocation(w, &size);
 
-    //std::cout << "Draw " << size.width << " - " << size.height << std::endl;
+    CairoPtr cr(gdk_cairo_create(gtk_widget_get_window(w)));
+    OnDrawCairo(cr, size.width, size.height);
+    return TRUE;
+}
+#else
+gboolean MainWnd::OnDrawDraw(GtkWidget *w, cairo_t *cr)
+{
+    OnDrawCairo(cr, gtk_widget_get_allocated_width(w), gtk_widget_get_allocated_height(w));
+    return TRUE;
+}
+#endif
 
-    CairoPtr cr(gdk_cairo_create(w->window));
+void MainWnd::OnDrawCairo(cairo_t *cr, int width, int height)
+{
+    //std::cout << "Draw " << width << " - " << height << std::endl;
+
     cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
     cairo_set_line_width(cr, 2);
 
@@ -607,10 +647,10 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
     double scrollW = 20;
 
     //szH,szW are the height and width of the file list view
-    double szH = size.height - (marginY1 + marginY2), szW = size.width - (marginX1 + marginX2 + scrollW);
+    double szH = height - (marginY1 + marginY2), szW = width - (marginX1 + marginX2 + scrollW);
     m_nLines = int(szH / lineH);
     szH = m_nLines * lineH;
-    marginY2 = size.height - (marginY1 + szH);
+    marginY2 = height - (marginY1 + szH);
 
     g_options.gr.colorFg.set_source(cr);
     cairo_translate(cr, marginX1, marginY1);
@@ -736,7 +776,7 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
         double marginChildW = 25, marginChildH = 25;
         pango_layout_set_text(layout, m_childText.data(), m_childText.size());
 
-        pango_layout_set_width(layout, (size.width - 2 * marginChildW) * PANGO_SCALE);
+        pango_layout_set_width(layout, (width - 2 * marginChildW) * PANGO_SCALE);
         pango_layout_set_height(layout, -1);
         pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_NONE);
         pango_layout_set_wrap(layout, PANGO_WRAP_WORD_CHAR);
@@ -745,7 +785,7 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
         double childW = double(baseRect.width) / PANGO_SCALE + 2 * marginChildW;
 
         cairo_set_matrix(cr, &matrix);
-        cairo_translate(cr, (size.width - childW) / 2 - marginX1, (size.height - childH) / 2 - marginY1);
+        cairo_translate(cr, (width - childW) / 2 - marginX1, (height - childH) / 2 - marginY1);
         cairo_rectangle(cr, 0, 0, childW, childH);
         g_options.gr.colorBg.set_source(cr);
         cairo_fill_preserve(cr);
@@ -754,8 +794,6 @@ gboolean MainWnd::OnDrawExpose(GtkWidget *w, GdkEventExpose *e)
         cairo_translate(cr, marginChildW, marginChildH);
         pango_cairo_show_layout(cr, layout);
     }
-    
-    return TRUE;
 }
 
 void MainWnd::Redraw()

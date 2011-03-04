@@ -5,6 +5,11 @@
 #include <stdexcept>
 #include <vector>
 
+//Define the macro below to enable the GObject type checking
+//for GPtr instantiations. Usually you won't need this, as the 
+//library checks the types at complile time.
+//#define MIGLIB_ENABLE_CHECK_CAST
+
 namespace miglib
 {
 
@@ -30,7 +35,7 @@ public:
     glib_error(GError *&error, const char *str)
         :base_type(make_str(error, str)), m_error(error)
     {
-        error = NULL;
+        error = NULL; //Stealed!
     }
     glib_error(const glib_error &e)
         :base_type(e)
@@ -87,7 +92,7 @@ public:
     }
     GError **Ptr()
     {
-        g_clear_error(&m_error);
+        Clear();
         return &m_error;
     }
     operator GError *()
@@ -104,183 +109,227 @@ public:
     }
     void Clear()
     {
-        g_clear_error(&m_error);
+        //g_clear_error(&m_error);
+        if (m_error)
+        {
+            g_error_free(m_error);
+            m_error = NULL;
+        }
     }
 };
 
 ////////////////////////////////////////////////////
 
-template <typename T> struct GPtrTraits
-{
-    static void Ref(T *ptr)
-    { g_object_ref(G_OBJECT(ptr)); }
-    static void Unref(T *ptr)
-    { g_object_unref(G_OBJECT(ptr)); }
-};
-
-struct GPtrFollow
-{
-    void FollowInit(void *&ptr)
-    {}
-    void Follow(void *&ptr)
-    {}
-    void Unfollow(void *&ptr)
-    {}
-};
-
-template <typename T, typename Q> 
-struct CheckCast
-{
-    static T* Cast(Q *q)
-    {
-        return q;
-    }
-};
-
 template <typename T> 
 struct GPtrCast
 {
 protected:
-    void *m_ptr;
-    GPtrCast(void *p)
-        :m_ptr(p)
+    gpointer m_ptr;
+
+    //The following are non-virtual overridables
+    void Init()
+    {}
+    void Follow()
+    {}
+    void Unfollow()
     {}
 public:
     operator T*() const
     {
         return static_cast<T*>(m_ptr);
     }
-    operator GTypeInstance *() const
+};
+
+template <typename T, typename Q> 
+struct CheckCast
+{
+    //This should check the cast only if MIGLIB_ENABLE_CHECK_CAST is defined
+    static T* Cast(Q *q)
     {
-        return static_cast<GTypeInstance *>(m_ptr);
+        return q;
+    }
+    //This should always check the cast
+    static T* CastChecked(Q *q)
+    {
+        return q;
     }
 };
 
-template <typename T, typename F=GPtrTraits<T>, typename P=GPtrFollow >
-class GPtr : public GPtrCast<T>, private P
+template<typename T> struct BorrowWrapper
+{
+    T *ptr;
+    explicit BorrowWrapper(T *p)
+        :ptr(p)
+    {}
+};
+
+template<typename T> BorrowWrapper<T> Borrow(T *p)
+{
+    return BorrowWrapper<T>(p);
+}
+
+template <typename T, typename F, typename P=GPtrCast<T> >
+class GPtr : public P
 {
 private:
-    typedef GPtrCast<T> cast_base;
+    typedef P base;
+    typedef F traits_type;
 
-    void *&Obj()
+    T *Obj()
     {
-        return cast_base::m_ptr;
+        return static_cast<T*>(this->m_ptr);
     }
-    void *Obj() const
+    T *Obj() const
     {
-        return cast_base::m_ptr;
+        return static_cast<T*>(this->m_ptr);
     }
-    T *ObjT()
+    T *SetObj(T *ptr)
     {
-        return static_cast<T*>(cast_base::m_ptr);
-    }
-    T *ObjT() const
-    {
-        return static_cast<T*>(cast_base::m_ptr);
+        this->m_ptr = ptr;
+        return ptr;
     }
 
 public:
-	GPtr()
-		:cast_base(NULL)
-	{}
-	explicit GPtr(T *ptr) //new reference
-		:cast_base(ptr)
-	{
-        if (Obj()) this->FollowInit(Obj());
-	}
-	template <typename Q> explicit GPtr(Q *ptr) //new reference
-		:cast_base(CheckCast<T,Q>::Cast(ptr))
-	{
-        if (Obj()) this->FollowInit(Obj());
-	}
-	GPtr(const GPtr &o)
-        :cast_base(o.ObjT())
-	{
-        if (Obj())
+    typedef T original_type;
+    GPtr()
+    {
+        SetObj(NULL);
+    }
+    explicit GPtr(T *ptr) //new reference
+    {
+        if (SetObj(ptr))
         {
-            F::Ref(ObjT());
-            this->Follow(Obj());
+            this->Init();
+            this->Follow();
         }
-	}
-	~GPtr()
-	{
+    }
+    template <typename Q> explicit GPtr(Q *ptr) //new reference
+    {
+        if (SetObj(CheckCast<T,Q>::CastChecked(ptr)))
+        {
+            this->Init();
+            this->Follow();
+        }
+    }
+    explicit GPtr(BorrowWrapper<T> ptr) //borrowed reference
+    {
+        if (SetObj(ptr.ptr))
+        {
+            traits_type::Ref(Obj());
+            this->Follow();
+        }
+    }
+    template <typename Q> explicit GPtr(BorrowWrapper<Q> ptr) //borrowed reference
+    {
+        if (SetObj(CheckCast<T,Q>::CastChecked(ptr.ptr)))
+        {
+            traits_type::Ref(Obj());
+            this->Follow();
+        }
+    }
+    GPtr(const GPtr &o)
+    {
+        if (SetObj(o.Obj()))
+        {
+            traits_type::Ref(Obj());
+            this->Follow();
+        }
+    }
+    ~GPtr()
+    {
         if (Obj()) 
         {
-            this->Unfollow(Obj());
-            F::Unref(ObjT());
+            this->Unfollow();
+            traits_type::Unref(Obj());
         }
-	}
+    }
     void Reset(T *ptr = NULL) //new reference
     {
-        if (Obj())
+        T *prev = Obj();
+        if (prev)
+            this->Unfollow();
+        if (SetObj(ptr))
         {
-            this->Unfollow(Obj());
-            F::Unref(ObjT());
+            this->Init();
+            this->Follow();
         }
-        cast_base::m_ptr = ptr;
-        if (Obj()) this->FollowInit(Obj());
-
+        if (prev)
+            traits_type::Unref(prev);
     }
     template <typename Q> void Reset(Q *ptr) //new reference
     {
-        T *t = CheckCast<T,Q>::Cast(ptr);
+        T *t = CheckCast<T,Q>::CastChecked(ptr);
         Reset(t);
     }
-	const GPtr &operator=(const GPtr &o)
-	{
-        if (Obj()) this->Unfollow(Obj());
+    void Reset(BorrowWrapper<T> ptr) //borrowed reference
+    {
+        T *prev = Obj();
+        if (prev)
+            this->Unfollow();
+        if (SetObj(ptr.ptr))
+        {
+            traits_type::Ref(Obj());
+            this->Follow();
+        }
+        if (prev)
+            traits_type::Unref(prev);
+    }
+    template <typename Q> void Reset(BorrowWrapper<Q> ptr) //borrowed reference
+    {
+        T *t = CheckCast<T,Q>::CastChecked(ptr);
+        Reset(BorrowWrapper<T>(t));
+    }
+    const GPtr &operator=(const GPtr &o)
+    {
+        if (Obj()) this->Unfollow();
 
-        if (o.Obj()) F::Ref(o.ObjT());
-        if (Obj()) F::Unref(ObjT());
-		Obj()= o.Obj();
-
-        if (Obj()) this->Follow(Obj());
-		return *this;
-	}
+        if (o.Obj()) traits_type::Ref(o.Obj());
+        if (Obj()) traits_type::Unref(Obj());
+        if (SetObj(o.Obj()))
+            this->Follow();
+        return *this;
+    }
     T *operator->() const
     {
-        return ObjT();
+        return Obj();
     }
-	T *Ptr() const
-	{
-		return ObjT();
-	}
+    T *Ptr() const
+    {
+        return Obj();
+    }
     void swap(GPtr &o)
     {
-        void *t = Obj();
+        T *prev = Obj();
 
-        if (Obj()) this->Unfollow(Obj());
-        if (o.Obj()) o.Unfollow(o.Obj());
+        if (Obj()) this->Unfollow();
+        if (o.Obj()) o.Unfollow();
 
-        Obj()= o.Obj();
-        o.Obj()= t;
-
-        if (Obj()) this->Follow(Obj());
-        if (o.Obj()) o.Follow(o.Obj());
+        if (SetObj(o.Obj()))
+            this->Follow();
+        if (o.SetObj(prev))
+            o.Follow();
     }
 };
 
-template<typename T, typename F, typename P> bool operator==(const GPtr<T,F,P> &a, const GPtr<T,F,P> &b)
+template<typename T, typename P, typename F> bool operator==(const GPtr<T,F,P> &a, const GPtr<T,F,P> &b)
 {
-    return a.Obj()== b.Obj();
+    return a.Obj() == b.Obj();
 }
 
-template<typename T, typename F, typename P> bool operator!=(const GPtr<T,F,P> &a, const GPtr<T,F,P> &b)
+template<typename T, typename P, typename F> bool operator!=(const GPtr<T,F,P> &a, const GPtr<T,F,P> &b)
 {
-    return a.Obj()!= b.Obj();
+    return a.Obj() != b.Obj();
 }
 
-template<typename T, typename F, typename P> bool operator<(const GPtr<T,F,P> &a, const GPtr<T,F,P> &b)
+template<typename T, typename P, typename F> bool operator<(const GPtr<T,F,P> &a, const GPtr<T,F,P> &b)
 {
-    return a.Obj()< b.Obj();
+    return a.Obj() < b.Obj();
 }
 
-template<typename T, typename F, typename P> void swap(GPtr<T,F,P> &a, GPtr<T,F,P> &b)
+template<typename T, typename P, typename F> void swap(GPtr<T,F,P> &a, GPtr<T,F,P> &b)
 {
     a.swap(b);
 }
-
-typedef GPtr<GObject> GObjectPtr;
 
 //////////////////////////////////////////////////////
 // Strings
@@ -300,12 +349,16 @@ public:
     }
     ~GCharPtr()
     {
-        g_free(m_ptr);
+        if (m_ptr)
+            g_free(m_ptr);
     }
     gchar **Ptr()
     {
-        g_free(m_ptr);
-        m_ptr = NULL;
+        if (m_ptr)
+        {
+            g_free(m_ptr);
+            m_ptr = NULL;
+        }
         return &m_ptr;
     }
     gchar **operator &()
@@ -340,8 +393,21 @@ public:
     }
     void Reset(gchar *s = NULL)
     {
-        g_free(m_ptr);
+        if (m_ptr)
+            g_free(m_ptr);
         m_ptr = s;
+    }
+    void Clear()
+    {
+        Reset(NULL);
+    }
+    bool Null() const
+    {
+        return m_ptr == NULL;
+    }
+    bool Empty() const
+    {
+        return m_ptr == NULL || m_ptr[0] == 0;
     }
 };
 
@@ -448,36 +514,81 @@ inline bool operator==(const GStringPtr &a, const GStringPtr &b)
     return g_string_equal(a.g_str(), b.g_str()) != FALSE;
 }
 
+class GStrVPtr
+{
+private:
+    gchar **m_ptr;
+public:
+    explicit GStrVPtr(gchar **ptr=NULL)
+        :m_ptr(ptr)
+    {
+    }
+    operator gchar**() const
+    {
+        return m_ptr;
+    }
+    ~GStrVPtr()
+    {
+        if (m_ptr)
+            g_strfreev(m_ptr);
+    }
+    gchar **Detach()
+    {
+        gchar **t = m_ptr;
+        m_ptr = NULL;
+        return t;
+    }
+    void Reset(gchar **s = NULL)
+    {
+        if (m_ptr)
+            g_strfreev(m_ptr);
+        m_ptr = s;
+    }
+    void Clear()
+    {
+        Reset(NULL);
+    }
+    bool Null() const
+    {
+        return m_ptr == NULL;
+    }
+    bool Empty() const
+    {
+        return m_ptr == NULL || m_ptr[0] == NULL;
+    }
+};
+
 //////////////////////////////////////////////////////
 
 class GListPtr
 {
 private:
-	GList *m_list;
+    GList *m_list;
 
     GListPtr(const GListPtr&); //nocopy
     void operator=(const GListPtr&); //nocopy
 public:
-	explicit GListPtr(GList *list)
-		:m_list(list)
-	{}
-	~GListPtr()
-	{
-		g_list_free(m_list);
-	}
-	operator GList *()
-	{
-		return m_list;
-	}
-	GList *operator->()
-	{
-		return m_list;
-	}
+    explicit GListPtr(GList *list)
+        :m_list(list)
+    {}
+    ~GListPtr()
+    {
+        g_list_free(m_list);
+    }
+    operator GList *()
+    {
+        return m_list;
+    }
+    GList *operator->()
+    {
+        return m_list;
+    }
 };
 //////////////////////////////////////////////////////
 
 template<typename T> struct MiGLibFunctions
 {
+    //Int this functions, the gpointer is the last parameter
     template<typename R, R (T::*M)()> 
         static R Static0(gpointer p)
     {
@@ -543,6 +654,7 @@ template<typename T> struct MiGLibFunctions
 
 #define MIGLIB_FUNC_7(R, A, B, C, D, E, F, G, cls, func) \
     ((R (*)(A,B,C,D,E,F,G,gpointer))(&::miglib::MiGLibFunctions<cls>::Static7<R, A, B, C, D, E, F, G, &cls::func>))
+
 ////
 
 #define MIGLIB_FUNCTION(R, cls, func) \
@@ -628,6 +740,9 @@ template<typename T> struct MiGLibFunctions
 #define MIGLIB_OBJECT_notify(src, prop, cls, func, ptr) \
     MIGLIB_CONNECT_2(src, "notify::" prop, void, GObject*, GParamSpec*, cls, func, ptr)
 
+#define MIGLIB_OBJECT_notify_any(src, cls, func, ptr) \
+    MIGLIB_CONNECT_2(src, "notify", void, GObject*, GParamSpec*, cls, func, ptr)
+
 
 
 class AutoSource
@@ -669,7 +784,6 @@ public:
                 MIGLIB_DESTROY_NOTIFY_FUNC(InfoSrcIO, OnDestroy));
         return info->id;
     }
-
     guint AddChildWatch(GPid pid, GChildWatchFunc fun, gpointer ptr, gint priority=G_PRIORITY_DEFAULT)
     {
         InfoSrcChild *info = new InfoSrcChild(this, fun, ptr);
@@ -698,26 +812,27 @@ private:
     void operator=(const AutoSource&); //nocopy
     struct InfoSrc
     {
+    public:
         guint id;
-    protected:
+    private:
         AutoSource *obj;
-
+    protected:
         InfoSrc(AutoSource *a)
             :id(0), obj(a)
         {
         }
         void OnDestroy()
-        { //subclasses should redefine this, or would not compile, don't know why...
+        { //subclasses should redefine this
             for (size_t i=0; i < obj->m_infos.size(); ++i)
             {
                 if (obj->m_infos[i] == this)
                 {
                     obj->m_infos[i] = obj->m_infos.back();
                     obj->m_infos.pop_back();
-                    break;                    
+                    break;
                 }
             }
-            //subclasses should do "delete this", it is not here to avoid the virtual destructor
+            //subclasses should do "delete this". It is not here to avoid the virtual destructor
         }
     };
     std::vector<InfoSrc*> m_infos;
@@ -781,18 +896,35 @@ private:
     };
 };
 
-//////////////////////////////////////////////
-//GIOChannels (not a GObject!!!)
-template<> struct GPtrTraits<GIOChannel>
+//The standard GObject ref-counting
+struct GObjectPtrTraits
 {
-    static void Ref(GIOChannel *ptr)
-    { g_io_channel_ref(ptr); }
-    static void Unref(GIOChannel *ptr)
-    { g_io_channel_unref(ptr); }
+    static void Ref(gpointer ptr)
+    { g_object_ref(ptr); }
+    static void Unref(gpointer ptr)
+    { g_object_unref(ptr); }
 };
 
-typedef GPtr<GIOChannel> GIOChannelPtr;
+//No-ops ref-counting
+struct GNoMagicPtrTraits
+{
+    static void Ref(gpointer ptr)
+    { }
+    static void Unref(gpointer ptr)
+    { }
+};
 
+
+template <typename T> class GIUPtrCast : public GPtrCast<T> //For GInitiallyUnowned
+{
+protected:
+    void Init()
+    {
+        g_object_ref_sink(this->m_ptr);
+    }
+};
+
+//Other utility functions
 inline void g_io_channel_set_raw_nonblock(GIOChannel *io, GError **error = NULL)
 {
     if (g_io_channel_set_encoding(io, NULL, error) == G_IO_STATUS_ERROR)
@@ -805,60 +937,139 @@ inline void g_io_channel_set_raw_nonblock(GIOChannel *io, GError **error = NULL)
 
 } //namespace miglib
 
-#define MIGLIB_DECL_EX(x, nm) namespace miglib { typedef GPtr< x > nm##Ptr; }
+//For specializations of GPtr with non-GObject types
+#define MIGLIB_INIT_REF_UNREF_PTR_EX(x, nm, init, ref, unref) namespace miglib { \
+    struct nm##PtrTraits                                        \
+    {                                                           \
+        static void Ref(x *ptr)                                 \
+        { (ref)(ptr); }                                         \
+        static void Unref(x *ptr)                               \
+        { (unref)(ptr); }                                       \
+    };                                                          \
+    class nm##PtrCast : public GPtrCast<x>                      \
+    {                                                           \
+    protected:                                                  \
+        void Init()                                             \
+        { (init)(*this); }                                      \
+    };                                                          \
+    typedef GPtr<x, nm##PtrTraits, nm##PtrCast> nm##Ptr;        \
+}
+#define MIGLIB_INIT_REF_UNREF_PTR(x, init, ref, unref) MIGLIB_INIT_REF_UNREF_PTR_EX(x, x, init, ref, unref)
+
+#define MIGLIB_REF_UNREF_PTR_EX(x, nm, ref, unref) namespace miglib { \
+    struct nm##PtrTraits                                        \
+    {                                                           \
+        static void Ref(x *ptr)                                 \
+        { (ref)(ptr); }                                         \
+        static void Unref(x *ptr)                               \
+        { (unref)(ptr); }                                       \
+    };                                                          \
+    typedef GPtr<x, nm##PtrTraits> nm##Ptr;                     \
+}
+#define MIGLIB_REF_UNREF_PTR(x, ref, unref) MIGLIB_REF_UNREF_PTR_EX(x, x, ref, unref)
+
+#define MIGLIB_UNREF_PTR_EX(x, nm, unref) namespace miglib {    \
+    struct nm##PtrTraits                                        \
+    {                                                           \
+        static void Unref(x *ptr)                               \
+        { (unref)(ptr); }                                       \
+    };                                                          \
+    typedef GPtr<x, nm##PtrTraits> nm##Ptr;                     \
+}
+#define MIGLIB_UNREF_PTR(x, unref) MIGLIB_UNREF_PTR_EX(x, x, unref)
+
+MIGLIB_REF_UNREF_PTR(GIOChannel, g_io_channel_ref, g_io_channel_unref)
+MIGLIB_REF_UNREF_PTR(GMainLoop, g_main_loop_ref, g_main_loop_unref)
+MIGLIB_REF_UNREF_PTR(GMainContext, g_main_context_ref, g_main_context_unref)
+MIGLIB_INIT_REF_UNREF_PTR(GVariant, g_variant_ref_sink, g_variant_ref, g_variant_unref)
+MIGLIB_UNREF_PTR(GVariantIter, g_variant_iter_free)
+MIGLIB_REF_UNREF_PTR(GVariantBuilder, g_variant_builder_ref, g_variant_builder_unref)
+
+
+//For the GObject hierarchy
+#define MIGLIB_DECL_EX(x, nm) namespace miglib { typedef GPtr< x, GObjectPtrTraits > nm##Ptr; \
+    typedef GPtr< x, GNoMagicPtrTraits > nm##PtrNM; }
 #define MIGLIB_DECL(x) MIGLIB_DECL_EX(x,x)
 
 #define MIGLIB_TYPE_CAST_MEMBER(sub)                    \
         operator sub*() const                           \
         { return static_cast<sub*>(this->m_ptr); }
 
-#define MIGLIB_SUBCLASS_EX_BEGIN(sub, cls, chk)         \
+#ifdef MIGLIB_ENABLE_CHECK_CAST
+#define MIGLIB_CHECK_CAST(sub, type, q) (G_TYPE_CHECK_INSTANCE_CAST ((q), type, sub))
+#else
+#define MIGLIB_CHECK_CAST(sub, type, q) reinterpret_cast<sub*>(q)
+#endif
+
+#define MIGLIB_SUBCLASS_EX_BEGIN(sub, cls, type)         \
 namespace miglib {                                      \
     template <typename Q> struct CheckCast<sub,Q>       \
     {                                                   \
         static sub *Cast(Q *q)                          \
-        { return chk(q); }                              \
+        { return MIGLIB_CHECK_CAST(sub, type, q); }      \
+        static sub *CastChecked(Q *q)                   \
+        { return (G_TYPE_CHECK_INSTANCE_CAST ((q), type, sub)); } \
     };                                                  \
     template <> struct GPtrCast<sub> : GPtrCast<cls>    \
     {                                                   \
-        typedef GPtrCast<cls> base_type;                \
-        GPtrCast<sub>(void *p)                          \
-            :base_type(p)                               \
-        {}                                              \
         MIGLIB_TYPE_CAST_MEMBER(sub)
 
 #define MIGLIB_SUBCLASS_EX_END()                        \
     };                                                  \
 }
 
-#define MIGLIB_SUBCLASS_EX(sub, cls, chk)   \
-    MIGLIB_SUBCLASS_EX_BEGIN(sub, cls, chk) \
+//For plain subclasses of GObject
+
+#define MIGLIB_SUBCLASS_EX(sub, cls, type)   \
+    MIGLIB_SUBCLASS_EX_BEGIN(sub, cls, type) \
     MIGLIB_SUBCLASS_EX_END()
 
-#define MIGLIB_SUBCLASS(sub, cls, chk)    \
-    MIGLIB_SUBCLASS_EX(sub, cls, chk)     \
+#define MIGLIB_SUBCLASS(sub, cls, type)    \
+    MIGLIB_SUBCLASS_EX(sub, cls, type)     \
     MIGLIB_DECL(sub)
 
-#define MIGLIB_SUBCLASS_ITF_1(sub, cls, itf1, chk)  \
-    MIGLIB_SUBCLASS_EX_BEGIN(sub, cls, chk)         \
+#define MIGLIB_SUBCLASS_ITF_1(sub, cls, itf1, type)  \
+    MIGLIB_SUBCLASS_EX_BEGIN(sub, cls, type)         \
     MIGLIB_TYPE_CAST_MEMBER(itf1)                   \
     MIGLIB_SUBCLASS_EX_END()                        \
     MIGLIB_DECL(sub)
 
-#define MIGLIB_SUBCLASS_ITF_2(sub, cls, itf1, itf2, chk)  \
-    MIGLIB_SUBCLASS_EX_BEGIN(sub, cls, chk)         \
+#define MIGLIB_SUBCLASS_ITF_2(sub, cls, itf1, itf2, type)  \
+    MIGLIB_SUBCLASS_EX_BEGIN(sub, cls, type)         \
     MIGLIB_TYPE_CAST_MEMBER(itf1)                   \
     MIGLIB_TYPE_CAST_MEMBER(itf2)                   \
     MIGLIB_SUBCLASS_EX_END()                        \
     MIGLIB_DECL(sub)
 
-#define MIGLIB_SUBCLASS_ITF_3(sub, cls, itf1, itf2, itf3, chk)  \
-    MIGLIB_SUBCLASS_EX_BEGIN(sub, cls, chk)         \
+#define MIGLIB_SUBCLASS_ITF_3(sub, cls, itf1, itf2, itf3, type)  \
+    MIGLIB_SUBCLASS_EX_BEGIN(sub, cls, type)         \
     MIGLIB_TYPE_CAST_MEMBER(itf1)                   \
     MIGLIB_TYPE_CAST_MEMBER(itf2)                   \
     MIGLIB_TYPE_CAST_MEMBER(itf3)                   \
     MIGLIB_SUBCLASS_EX_END()                        \
     MIGLIB_DECL(sub)
+
+
+//For subclasses of GInitiallyUnowned
+#define MIGIU_DECL_EX(x, nm) namespace miglib { typedef GPtr< x, GObjectPtrTraits, GIUPtrCast<x> > nm##Ptr; \
+    typedef GPtr< x, GNoMagicPtrTraits > nm##PtrNM; }
+#define MIGIU_DECL(x) MIGIU_DECL_EX(x,x)
+
+#define MIGIU_SUBCLASS(sub,cls,type) MIGLIB_SUBCLASS_EX(sub,cls,type) \
+    MIGIU_DECL(sub)
+
+//The one and only GObjectPtr is here!
+//GObjects are somewhat like a sublcass of GTypeInstance
+MIGLIB_SUBCLASS(GObject, GTypeInstance, G_TYPE_OBJECT)
+
+//GInitiallyUnowned is a subclass of GObject, but they use the very 
+//same struct. This is unfortunate because we cannot specialize
+//both the GPtr* templates for both types (they are the same).
+//So we just reuse the specializations from GObject and declare a 
+//new pointer type. The only drawback is that G_TYPE_OBJECT is used 
+//instead of G_TYPE_INITIALLY_UNOWNED for checking.
+//MIGLIB_SUBCLASS(GInitiallyUnowned, GObject, G_TYPE_INITIALLY_UNOWNED)
+MIGIU_DECL(GInitiallyUnowned)
 
 #endif // MIGLIB_H_INCLUDED
 
