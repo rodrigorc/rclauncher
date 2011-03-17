@@ -276,7 +276,7 @@ public:
     }
     template <typename Q> void Reset(BorrowWrapper<Q> ptr) //borrowed reference
     {
-        T *t = CheckCast<T,Q>::CastChecked(ptr);
+        T *t = CheckCast<T,Q>::CastChecked(ptr.ptr);
         Reset(BorrowWrapper<T>(t));
     }
     const GPtr &operator=(const GPtr &o)
