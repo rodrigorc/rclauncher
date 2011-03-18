@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <string.h>
+#include <stdint.h>
 
 #include <regex.h>
 #include <wordexp.h>
@@ -131,10 +132,11 @@ struct FileAssoc
 
 struct DirEntry
 {
-    std::string name;
+    std::string dispName, fileName;
     bool isDir;
-    DirEntry(const std::string &n, bool d)
-        :name(n), isDir(d)
+    FileAssoc *assoc;
+    DirEntry(const std::string &disp, const std::string &file, FileAssoc *fa, bool d)
+        :dispName(disp), fileName(file), isDir(d), assoc(fa)
     {}
     bool operator < (const DirEntry &o) const
     {
@@ -142,23 +144,77 @@ struct DirEntry
             return true;
         if (!isDir && o.isDir)
             return false;
-        bool p1 = name == "..", p2 = o.name == "..";
+        bool p1 = dispName == "..", p2 = o.dispName == "..";
         if (p1 && !p2)
             return true;
         if (!p1 && p2)
             return false;
-        int r = strcoll(name.c_str(), o.name.c_str());
+        int r = strcoll(dispName.c_str(), o.dispName.c_str());
         return r < 0;
     }
 };
 
-static void list_dir(const std::string &path, std::vector<DirEntry> &files)
+class Lister
 {
-    files.clear();
-    if (path != "/")
-        files.push_back(DirEntry("..", true));
+public:
+    Lister(int id)
+        :m_id(id)
+    {}
+    virtual ~Lister()
+    {}
 
-    DIR *dir = opendir(path.c_str());
+    int Id()
+    { return m_id; }
+    virtual std::string Title(const std::string &cwd) =0;
+    virtual std::string Root() =0;
+    virtual void ListDir(const std::string &path, std::vector<DirEntry> &files) =0;
+    virtual std::string ActualFile(const std::string &cwd, const DirEntry &entry) =0;
+    virtual FileAssoc *Match(const DirEntry &entry) =0;
+private:
+    int m_id;
+};
+
+class FileLister : public Lister
+{
+public:
+    FileLister(int id, const std::string &title, const std::string &root)
+        :Lister(id), m_title(title), m_root(root)
+    {}
+
+    std::string Title(const std::string &cwd)
+    {
+        std::string res = m_title;
+        if (!res.empty())
+           res += ": ";
+        res += cwd;
+        return res;
+    }
+    std::string Root()
+    { return m_root; }
+    void ListDir(const std::string &path, std::vector<DirEntry> &files);
+    virtual std::string ActualFile(const std::string &cwd, const DirEntry &entry)
+    {
+        std::string fullPath = cwd;
+        if (fullPath != "/")
+            fullPath += "/";
+        fullPath += entry.fileName;
+        return m_root + fullPath;
+    }
+    virtual FileAssoc *Match(const DirEntry &entry)
+    { return entry.assoc; }
+private:
+    std::string m_title, m_root;
+};
+
+FileLister g_defaultLister(0, "", "/");
+
+void FileLister::ListDir(const std::string &path, std::vector<DirEntry> &files)
+{
+    std::string realPath = m_root + path;
+    if (realPath != "/" && realPath != "//")
+        files.push_back(DirEntry("..", "..", NULL, true));
+
+    DIR *dir = opendir(realPath.c_str());
     if (!dir)
         return;
 
@@ -176,7 +232,7 @@ static void list_dir(const std::string &path, std::vector<DirEntry> &files)
 #endif
         {
             struct stat st;
-            if (stat((path + "/" + entry->d_name).c_str(), &st) == 0)
+            if (stat((realPath + "/" + entry->d_name).c_str(), &st) == 0)
             {
                 type = S_ISDIR(st.st_mode)? T_Dir : 
                        S_ISREG(st.st_mode)? T_File : 
@@ -196,12 +252,13 @@ static void list_dir(const std::string &path, std::vector<DirEntry> &files)
         {
             if (name[0] == '.')
                 continue; //hidden folder
-            files.push_back(DirEntry(name, true));
+            files.push_back(DirEntry(name, name, NULL, true));
         }
         else if (type == T_File)
         {
-            if (FileAssoc::Match(name))
-                files.push_back(DirEntry(name, false));
+            FileAssoc *assoc = FileAssoc::Match(name);
+            if (assoc)
+                files.push_back(DirEntry(name, name, assoc, false));
         }
     }
 
@@ -210,11 +267,204 @@ static void list_dir(const std::string &path, std::vector<DirEntry> &files)
     std::sort(files.begin(), files.end());
 }
 
-struct Favorite
+class FlashLister : public Lister
 {
-    int id;
-    std::string name, path;
+public:
+    FlashLister(int id)
+        :Lister(id)
+    {}
+    virtual std::string Title(const std::string &) 
+    { return "Flash"; }
+    virtual std::string Root()
+    { return ""; }
+    virtual void ListDir(const std::string &path, std::vector<DirEntry> &files);
+    virtual std::string ActualFile(const std::string &cwd, const DirEntry &entry)
+    { return entry.fileName; }
+    virtual FileAssoc *Match(const DirEntry &entry)
+    { return entry.assoc; }
 };
+
+void FlashLister::ListDir(const std::string &path, std::vector<DirEntry> &files)
+{
+    DIR *proc = opendir("/proc");
+    if (!proc)
+        return;
+    while (dirent *eproc = readdir(proc))
+    {
+        char *end;
+        strtol(eproc->d_name, &end, 10);
+        if (*end) //not an integer
+            continue;
+        std::string path = "/proc/";
+        path += eproc->d_name;
+        path += "/fd";
+
+        DIR *fd = opendir(path.c_str());
+        if (!fd)
+            continue;
+        while (dirent *efd = readdir(fd))
+        {
+            std::string s = path + "/" + efd->d_name;
+            char target[100];
+            int len = readlink(s.c_str(), target, sizeof(target) - 1);
+            if (len < 0)
+                continue;
+            target[len] = 0;
+            const char *slash = strrchr(target, '/');
+            if (slash)
+            {
+                ++slash;
+                const char *end = strchr(slash, ' ');
+                if (!end)
+                    end = slash + strlen(slash);
+                std::string base(slash, end);
+                if (base.substr(0, 6) == "FlashX")
+                {
+                    FileAssoc *assoc = FileAssoc::Match(base);
+                    if (assoc)
+                        files.push_back(DirEntry(base, s, assoc, false));
+                }
+            }
+        }
+        closedir(fd);
+
+    }
+    closedir(proc);
+}
+
+class AmuleLister : public Lister
+{
+public:
+    AmuleLister(int id, const std::string &root)
+        :Lister(id), m_root(root)
+    {}
+    virtual std::string Title(const std::string &) 
+    { return "aMule"; }
+    virtual std::string Root()
+    { return ""; }
+    virtual void ListDir(const std::string &path, std::vector<DirEntry> &files);
+    virtual std::string ActualFile(const std::string &cwd, const DirEntry &entry)
+    { return entry.fileName; }
+    virtual FileAssoc *Match(const DirEntry &entry)
+    { return entry.assoc; } 
+private:
+    std::string m_root;
+};
+
+void AmuleLister::ListDir(const std::string &, std::vector<DirEntry> &files)
+{
+    DIR *dir = opendir(m_root.c_str());
+    if (!dir)
+        return;
+
+    while (dirent *entry = readdir(dir))
+    {
+#ifdef _DIRENT_HAVE_D_TYPE
+        if (entry->d_type != DT_UNKNOWN && entry->d_type != DT_LNK)
+        {
+            if (entry->d_type != DT_REG)
+                continue;
+        }
+        else
+#endif
+        {
+            struct stat st;
+            if (stat((m_root + "/" + entry->d_name).c_str(), &st) < 0 ||
+                    !S_ISREG(st.st_mode))
+               continue;
+        }
+
+        size_t len = strlen(entry->d_name);
+        if (len < 4 || strcmp(entry->d_name + len - 4, ".met") != 0)
+            continue;
+        std::ifstream ifs((m_root + "/" + entry->d_name).c_str(), std::ios::binary);
+        //g_print("File: %s\n", entry->d_name);
+        uint8_t version;
+        ifs.read((char*)&version, 1);
+        if (version != 0xE0)
+            continue;
+        ifs.ignore(4 + 16); //date + hash
+        uint16_t parts;
+        ifs.read((char*)&parts, 2);
+        ifs.ignore(parts * 16); //hashes
+        uint32_t tags;
+        ifs.read((char*)&tags, 4);
+        for (uint32_t i = 0; i < tags; ++i)
+        {
+            uint8_t type, uname;
+            ifs.read((char*)&type, 1);
+            if (type & 0x80)
+            {
+                type &= 0x7F;
+                ifs.read((char*)&uname, 1);
+	    }
+            else
+            {
+                uint16_t len;
+                ifs.read((char*)&len, 2);
+                if (len == 1)
+                    ifs.read((char*)&uname, 1);
+                else
+                {
+                    uname = 0xFF;
+                    ifs.ignore(len);
+                }
+            }
+            switch (type)
+            {
+            case 1: //HASH16
+                ifs.ignore(16);
+                break;
+            case 2: //STRING
+                {
+                    uint16_t slen;
+                    ifs.read((char*)&slen, 2);
+                    std::vector<char> s(slen + 1);
+                    ifs.read(s.data(), slen);
+                    //g_print("\t%d: '%s'\n", uname, s.data());
+                    if (uname == 1) //filename
+                    {
+                        std::string name(s.data());
+                        FileAssoc *assoc = FileAssoc::Match(name);
+                        if (assoc)
+                            files.push_back(DirEntry(name, m_root + "/" + std::string(entry->d_name, len - 4), assoc, false));
+                        goto next;
+                    }
+                }
+                break;
+            case 3: //UINT32
+                ifs.ignore(4);
+                break;
+            case 4: //FLOAT32
+                ifs.ignore(4);
+                break;
+            case 5: //BOOL
+                ifs.ignore(1);
+                break;
+            case 11://UINT64
+                ifs.ignore(8);
+                break;
+            case 8: //UINT16
+                ifs.ignore(2);
+                break;
+            case 9: //UINT8
+                ifs.ignore(1);
+                break;
+            case 6: //BOOLARRAY
+                //TODO
+            case 7: //BLOB
+                //TODO
+            case 10://BSOB
+                //TODO
+            default:
+                goto next;
+            }
+        }
+next:;
+    }
+    closedir(dir);
+    std::sort(files.begin(), files.end());
+}
 
 struct GraphicOptions
 {
@@ -244,12 +494,14 @@ struct Options
 {
     GraphicOptions gr;
     std::vector<FileAssoc*> assocs;
-    std::vector<Favorite> favorites;
+    std::vector<Lister*> favorites;
 
     ~Options()
     {
         for (size_t i = 0; i < assocs.size(); ++i)
             delete assocs[i];
+        for (size_t i = 0; i < favorites.size(); ++i)
+            delete favorites[i];
     }
 } g_options;
 
@@ -273,13 +525,13 @@ private:
     GtkWindowPtr m_wnd;
     GtkDrawingAreaPtr m_draw;
     LircClient m_lirc;
-    std::string m_cwd;
+    Lister *m_lister;
+    std::string m_cwd; //relative to m_lister
     int m_lineSel, m_firstLine, m_nLines;
     std::vector<DirEntry> m_files;
     GPid m_childPid;
     std::string m_childText;
     bool m_isKillable;
-    int m_favoriteIdx;
 
     PangoFontDescriptionPtr m_font, m_fontTitle;
 
@@ -297,9 +549,10 @@ private:
     void Move(int inc);
     void Select(bool onlyDir);
     void Back();
+    void Refresh();
     void ChangePath(const std::string &path, bool findFav = true);
     bool ChangeFavorite(int nfav);
-    void Open(const std::string &path);
+    void Open(const DirEntry &entry);
     void OnChildWatch(GPid pid, gint status);
 
     void Redraw();
@@ -310,8 +563,10 @@ private:
 
 
 MainWnd::MainWnd(const std::string &lircFile)
-    :m_lirc(lircFile, this), m_childPid(0), m_isKillable(false), m_favoriteIdx(-1)
+    :m_lirc(lircFile, this), m_childPid(0), m_isKillable(false)
 {
+    m_lister = &g_defaultLister;
+
     m_wnd.Reset( gtk_window_new(GTK_WINDOW_TOPLEVEL) );
     MIGTK_WIDGET_destroy(m_wnd, MainWnd, OnDestroy, this);
 
@@ -334,13 +589,17 @@ MainWnd::MainWnd(const std::string &lircFile)
     gtk_widget_show_all(m_wnd);
 
     if (!ChangeFavorite(1))
-        ChangePath(".");
+        ChangePath("/");
 }
 
 gboolean MainWnd::OnDrawKey(GtkWidget *w, GdkEventKey *e)
 {
     if (m_childPid != 0)
+    {
+        if (m_isKillable && m_childPid && e->keyval == GDK_KEY_Escape)
+            kill(m_childPid, SIGTERM);
         return TRUE;
+    }
 
     switch (e->keyval)
     {
@@ -371,6 +630,9 @@ gboolean MainWnd::OnDrawKey(GtkWidget *w, GdkEventKey *e)
     case GDK_KEY_Return:
     case GDK_KEY_KP_Enter:
         Select(false);
+        break;
+    case GDK_KEY_space:
+        Refresh();
         break;
     case GDK_KEY_1: 
     case GDK_KEY_KP_1: 
@@ -412,10 +674,6 @@ gboolean MainWnd::OnDrawKey(GtkWidget *w, GdkEventKey *e)
     case GDK_KEY_KP_0: 
         ChangeFavorite(10); 
         break;
-    case GDK_KEY_Escape:
-        if (m_isKillable && m_childPid)
-            kill(m_childPid, SIGTERM);
-        break;
     default:
         //std::cout << "Key: " << std::hex << e->keyval << std::dec << std::endl;
         break;
@@ -440,7 +698,7 @@ void MainWnd::Select(bool onlyDir)
     const DirEntry &entry = m_files[m_lineSel];
     if (entry.isDir)
     {
-        if (entry.name == "..")
+        if (entry.dispName == "..")
         {
             Back();
         }
@@ -448,25 +706,35 @@ void MainWnd::Select(bool onlyDir)
         {
             if (m_cwd == "/")
                 m_cwd.clear(); //to avoid the double /
-            ChangePath(m_cwd + "/" + entry.name);
+            ChangePath(m_cwd + "/" + entry.fileName); //TODO: virtualyze
         }
     }
     else if (!onlyDir)
     {
-        Open(entry.name);
+        Open(entry);
     }
+}
+
+void MainWnd::Refresh()
+{
+    ChangePath(m_cwd);
 }
 
 void MainWnd::Back()
 {
-    size_t slash = m_cwd.rfind('/');
+    if (m_cwd == "/")
+    {
+        m_cwd = m_lister->Root();
+        m_lister = &g_defaultLister;
+    }
+    size_t slash = m_cwd == "/"? std::string::npos : m_cwd.rfind('/');
     if (slash != std::string::npos)
     {
         std::string leaf = m_cwd.substr(slash + 1);
         ChangePath(m_cwd.substr(0, slash));
         for (size_t i = 0; i < m_files.size(); ++i)
         {
-            if (m_files[i].name == leaf)
+            if (m_files[i].fileName == leaf)
             {
                 m_lineSel = i;
                 break;
@@ -474,34 +742,44 @@ void MainWnd::Back()
         }
     }
     else
+    {
         ChangePath("/");
+    }
 }
 
 void MainWnd::ChangePath(const std::string &path, bool findFav /*=true*/)
 {
+    //g_print("ChangePath '%s' -> '%s'\n", m_cwd.c_str(), path.c_str());
     m_cwd = path;
-    if (m_cwd.empty())
-        m_cwd = "/";
-
-    while (m_cwd.size() > 1 && m_cwd[m_cwd.size() - 1] == '/')
-        m_cwd = m_cwd.substr(0, m_cwd.size() - 1);
-
-    list_dir(m_cwd, m_files);
-    m_lineSel = m_firstLine = 0;
-    m_nLines = 1;
 
     if (findFav)
     {
-        m_favoriteIdx = -1;
+        std::string realPath = m_lister->Root() + path;
         for (size_t i = 0; i < g_options.favorites.size(); ++i)
         {
-            if (g_options.favorites[i].path == path.substr(0, g_options.favorites[i].path.size()))
+            const std::string &root = g_options.favorites[i]->Root();
+            if (root.empty())
+                continue;
+            if (root == path.substr(0, root.size()))
             {
-                m_favoriteIdx = i;
+                m_lister = g_options.favorites[i];
+                m_cwd = path.substr(root.size());
                 break;
             }
         }
     }
+    if (m_cwd.empty())
+        m_cwd = "/";
+
+    //remove the ending /'s
+    while (m_cwd.size() > 1 && m_cwd[m_cwd.size() - 1] == '/')
+        m_cwd = m_cwd.substr(0, m_cwd.size() - 1);
+
+    m_files.clear();
+    m_lister->ListDir(m_cwd, m_files);
+    m_lineSel = m_firstLine = 0;
+    m_nLines = 1;
+
     Redraw();
 }
 
@@ -510,16 +788,14 @@ bool MainWnd::ChangeFavorite(int nfav)
     size_t i;
     for (i = 0; i < g_options.favorites.size(); ++i)
     {
-        if (g_options.favorites[i].id == nfav)
+        if (g_options.favorites[i]->Id() == nfav)
             break;
     }
     if (i == g_options.favorites.size())
         return false;
 
-    Favorite &fav = g_options.favorites[i];
-
-    m_favoriteIdx = i;
-    ChangePath(fav.path, false);
+    m_lister = g_options.favorites[i];
+    ChangePath("/", false);
     return true;
 }
 
@@ -529,13 +805,13 @@ static void SetupSpawnedEnviron(gpointer data)
     g_setenv("DISPLAY", display, TRUE);
 }
 
-void MainWnd::Open(const std::string &path)
+void MainWnd::Open(const DirEntry &entry)
 {
-    std::string fullPath = m_cwd + "/" + path;
+    std::string fullPath = m_lister->ActualFile(m_cwd, entry);
     if (g_verbose)
         std::cout << "Run " << fullPath << std::endl;
 
-    FileAssoc *assoc = FileAssoc::Match(path);
+    FileAssoc *assoc = m_lister->Match(entry);
     if (!assoc)
     {
         if (g_verbose)
@@ -573,7 +849,7 @@ void MainWnd::Open(const std::string &path)
     if (res)
     {
         MIGLIB_CHILD_WATCH_ADD(m_childPid, MainWnd, OnChildWatch, this);
-        m_childText = path;
+        m_childText = entry.dispName;
         m_isKillable = assoc->isKillable;
         Redraw();
     }
@@ -691,7 +967,7 @@ void MainWnd::OnDrawCairo(cairo_t *cr, int width, int height)
     {
         const DirEntry &entry = m_files[nLine];
 
-        pango_layout_set_text(layout, entry.name.data(), entry.name.size());
+        pango_layout_set_text(layout, entry.dispName.data(), entry.dispName.size());
         if (static_cast<int>(nLine) == m_lineSel)
         {
             g_options.gr.colorFg.set_source(cr);
@@ -748,21 +1024,7 @@ void MainWnd::OnDrawCairo(cairo_t *cr, int width, int height)
     pango_layout_set_font_description(layout, m_fontTitle);
     pango_layout_set_width(layout, (szW + scrollW) * PANGO_SCALE);
 
-    std::string title;
-    if (m_favoriteIdx >= 0 && m_favoriteIdx < static_cast<int>(g_options.favorites.size()))
-    {
-        const Favorite &fav = g_options.favorites[m_favoriteIdx];
-        if (m_cwd.size() >= fav.path.size())
-        {
-            title = fav.name + ": " + m_cwd.substr(fav.path.size());
-            if (m_cwd.size() == fav.path.size())
-                title += "/";
-        }
-        else
-            title = m_cwd;
-    }
-    else
-        title = m_cwd;
+    std::string title = m_lister->Title(m_cwd);
     pango_layout_set_text(layout, title.data(), title.size());
 
     cairo_set_matrix(cr, &matrix);
@@ -824,6 +1086,8 @@ void MainWnd::OnLircCommand(const char *cmd)
         Select(true);
     else if (strcmp(cmd, "left") == 0)
         Back();
+    else if (strcmp(cmd, "refresh") == 0)
+        Refresh();
     else if (strlen(cmd) > 4 && memcmp(cmd, "fav ", 4) == 0)
     {
         int nfav = atoi(cmd + 4);
@@ -854,7 +1118,7 @@ public:
         }
         SetStateAttr(TAG_FONT, "name", "desc", NULL);
         SetStateAttr(TAG_COLOR, "name", "r", "g", "b", NULL);
-        SetStateAttr(TAG_FAVORITE, "num", "name", "path", NULL);
+        SetStateAttr(TAG_FAVORITE, "num", "name", "path", "module", NULL);
         SetStateAttr(TAG_PATTERN, "match", "ext", "command", "killable", NULL);
     }
 protected:
@@ -900,14 +1164,20 @@ private:
     }
     void ParseFavorite(const attributes_t &atts)
     {
-        const std::string &num = atts[0], &name = atts[1], &path = atts[2];
-
-        Favorite f;
-        f.id = atoi(num.c_str());
-        f.name = name;
-        f.path = path;
-        if (f.id != 0 && !f.name.empty() && !f.path.empty())
-            g_options.favorites.push_back(f);
+        const std::string &num = atts[0], &name = atts[1], &path = atts[2], &module = atts[3];
+        int id = atoi(num.c_str());
+        if (id != 0)
+        {
+            Lister *lister = NULL;
+            if (module.empty() || module == "file")
+                lister = new FileLister(id, name, path);
+            else if (module == "amule")
+                lister = new AmuleLister(id, path);
+            else if (module == "flash")
+                lister = new FlashLister(id);
+            if (lister)
+                g_options.favorites.push_back(lister);
+        }
     }
     void ParsePattern(const attributes_t &atts, bool isRegex)
     {
