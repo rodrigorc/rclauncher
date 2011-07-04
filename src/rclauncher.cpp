@@ -17,6 +17,7 @@
 #include <iostream>
 #include <algorithm>
 
+#include <gdk/gdkx.h>
 #include "miglib/migtk.h"
 #include "miglib/migtkconn.h"
 #include "miglib/mipango.h"
@@ -25,11 +26,66 @@
 
 #include "xml/simplexmlparse.h"
 
+class OpenDir
+{
+public:
+    OpenDir(DIR *dir=NULL)
+        :m_dir(dir)
+    {}
+    OpenDir(const char *name)
+    {
+        m_dir = opendir(name);
+    }
+    OpenDir(std::string &name)
+    {
+        m_dir = opendir(name.c_str());
+    }
+    ~OpenDir()
+    {
+        Reset();
+    }
+    void Reset(DIR *dir=NULL)
+    {
+        if (m_dir)
+            closedir(m_dir);
+        m_dir = dir;
+    }
+    operator DIR *() const
+    { return m_dir; }
+private:
+    DIR *m_dir;
+};
+
+std::string BaseName(const std::string &file)
+{
+    if (file == "/")
+        return file;
+
+    size_t slash = file.rfind('/');
+    if (slash == std::string::npos)
+        return "";
+    else
+        return file.substr(slash + 1);
+}
+
+std::string DirName(const std::string &file)
+{
+    if (file == "/")
+        return file;
+
+    size_t slash = file.rfind('/');
+    if (slash == std::string::npos)
+        return "";
+    else if (slash == 0)
+        return "/";
+    else
+        return file.substr(0, slash);
+}
+
 using namespace miglib;
 
 bool g_verbose = false;
 bool g_fullscreen = true;
-
 
 struct ILircClient
 {
@@ -126,29 +182,37 @@ struct FileAssoc
         :regex(re, cflags), isKillable(false)
     {
     }
-    static FileAssoc *Match(const std::string &file);
+    static FileAssoc *Match(const std::vector<FileAssoc*> &assocs, const std::string &file);
+    static FileAssoc *MatchGlobal(const std::string &file);
 };
 
 
 struct DirEntry
 {
+    //dispName is the name shown to the user
+    //fileName is a lister-specific text to be used by Lister::ActualFile() to build the real file name
     std::string dispName, fileName;
     bool isDir;
     FileAssoc *assoc;
     DirEntry(const std::string &disp, const std::string &file, FileAssoc *fa, bool d)
         :dispName(disp), fileName(file), isDir(d), assoc(fa)
-    {}
+    {
+        //assert((fa == NULL) == isDir); //assoc is NULL iff !isDir
+    }
     bool operator < (const DirEntry &o) const
     {
+        //First of all the directories
         if (isDir && !o.isDir)
             return true;
         if (!isDir && o.isDir)
             return false;
+        //And the top directory is always "..", if present.
         bool p1 = dispName == "..", p2 = o.dispName == "..";
         if (p1 && !p2)
             return true;
         if (!p1 && p2)
             return false;
+        //Then use collation order
         int r = strcoll(dispName.c_str(), o.dispName.c_str());
         return r < 0;
     }
@@ -161,7 +225,15 @@ public:
         :m_id(id)
     {}
     virtual ~Lister()
-    {}
+    {
+        for (size_t i = 0; i < m_assocs.size(); ++i)
+            delete m_assocs[i];
+    }
+    void AddAssoc(FileAssoc *fa)
+    {
+        m_assocs.push_back(fa);
+    }
+
 
     int Id()
     { return m_id; }
@@ -169,9 +241,18 @@ public:
     virtual std::string Root() =0;
     virtual void ListDir(const std::string &path, std::vector<DirEntry> &files) =0;
     virtual std::string ActualFile(const std::string &cwd, const DirEntry &entry) =0;
-    virtual FileAssoc *Match(const DirEntry &entry) =0;
+
+    virtual FileAssoc *Match(const std::string &file)
+    { //By default, if any assocciation is defined use the local list.
+      //If no associations in this lister, the default list is used.
+        if (!m_assocs.empty())
+            return FileAssoc::Match(m_assocs, file);
+        else
+            return FileAssoc::MatchGlobal(file);
+    }
 private:
     int m_id;
+    std::vector<FileAssoc*> m_assocs;
 };
 
 class FileLister : public Lister
@@ -200,8 +281,6 @@ public:
         fullPath += entry.fileName;
         return m_root + fullPath;
     }
-    virtual FileAssoc *Match(const DirEntry &entry)
-    { return entry.assoc; }
 private:
     std::string m_title, m_root;
 };
@@ -214,7 +293,7 @@ void FileLister::ListDir(const std::string &path, std::vector<DirEntry> &files)
     if (realPath != "/" && realPath != "//")
         files.push_back(DirEntry("..", "..", NULL, true));
 
-    DIR *dir = opendir(realPath.c_str());
+    OpenDir dir(realPath);
     if (!dir)
         return;
 
@@ -256,50 +335,48 @@ void FileLister::ListDir(const std::string &path, std::vector<DirEntry> &files)
         }
         else if (type == T_File)
         {
-            FileAssoc *assoc = FileAssoc::Match(name);
+            FileAssoc *assoc = Match(name);
             if (assoc)
                 files.push_back(DirEntry(name, name, assoc, false));
         }
     }
 
-    closedir(dir);
-
     std::sort(files.begin(), files.end());
 }
 
-class FlashLister : public Lister
+class OpenedFileLister : public Lister
 {
 public:
-    FlashLister(int id)
-        :Lister(id)
+    OpenedFileLister(int id, const std::string &title)
+        :Lister(id), m_title(title)
     {}
     virtual std::string Title(const std::string &) 
-    { return "Flash"; }
+    { return m_title; }
     virtual std::string Root()
     { return ""; }
     virtual void ListDir(const std::string &path, std::vector<DirEntry> &files);
     virtual std::string ActualFile(const std::string &cwd, const DirEntry &entry)
     { return entry.fileName; }
-    virtual FileAssoc *Match(const DirEntry &entry)
-    { return entry.assoc; }
+private:
+    std::string m_title;
 };
 
-void FlashLister::ListDir(const std::string &path, std::vector<DirEntry> &files)
+void OpenedFileLister::ListDir(const std::string &path, std::vector<DirEntry> &files)
 {
-    DIR *proc = opendir("/proc");
+    OpenDir proc("/proc");
     if (!proc)
         return;
     while (dirent *eproc = readdir(proc))
     {
         char *end;
-        strtol(eproc->d_name, &end, 10);
+        (void)(strtol(eproc->d_name, &end, 10) == 0); //to avoid the warn_unused_result
         if (*end) //not an integer
             continue;
         std::string path = "/proc/";
         path += eproc->d_name;
         path += "/fd";
 
-        DIR *fd = opendir(path.c_str());
+        OpenDir fd(path);
         if (!fd)
             continue;
         while (dirent *efd = readdir(fd))
@@ -314,22 +391,16 @@ void FlashLister::ListDir(const std::string &path, std::vector<DirEntry> &files)
             if (slash)
             {
                 ++slash;
-                const char *end = strchr(slash, ' ');
+                const char *end = strchr(slash, ' '); //sometimes ' (deleted)' is added to the filename
                 if (!end)
                     end = slash + strlen(slash);
                 std::string base(slash, end);
-                if (base.substr(0, 6) == "FlashX")
-                {
-                    FileAssoc *assoc = FileAssoc::Match(base);
-                    if (assoc)
-                        files.push_back(DirEntry(base, s, assoc, false));
-                }
+                FileAssoc *assoc = Match(base);
+                if (assoc)
+                    files.push_back(DirEntry(base, s, assoc, false));
             }
         }
-        closedir(fd);
-
     }
-    closedir(proc);
 }
 
 class AmuleLister : public Lister
@@ -345,15 +416,13 @@ public:
     virtual void ListDir(const std::string &path, std::vector<DirEntry> &files);
     virtual std::string ActualFile(const std::string &cwd, const DirEntry &entry)
     { return entry.fileName; }
-    virtual FileAssoc *Match(const DirEntry &entry)
-    { return entry.assoc; } 
 private:
     std::string m_root;
 };
 
 void AmuleLister::ListDir(const std::string &, std::vector<DirEntry> &files)
 {
-    DIR *dir = opendir(m_root.c_str());
+    OpenDir dir(m_root);
     if (!dir)
         return;
 
@@ -425,7 +494,7 @@ void AmuleLister::ListDir(const std::string &, std::vector<DirEntry> &files)
                     if (uname == 1) //filename
                     {
                         std::string name(s.data());
-                        FileAssoc *assoc = FileAssoc::Match(name);
+                        FileAssoc *assoc = Match(name);
                         if (assoc)
                             files.push_back(DirEntry(name, m_root + "/" + std::string(entry->d_name, len - 4), assoc, false));
                         goto next;
@@ -462,7 +531,6 @@ void AmuleLister::ListDir(const std::string &, std::vector<DirEntry> &files)
         }
 next:;
     }
-    closedir(dir);
     std::sort(files.begin(), files.end());
 }
 
@@ -505,11 +573,15 @@ struct Options
     }
 } g_options;
 
-/*static*/FileAssoc *FileAssoc::Match(const std::string &file)
+/*static*/FileAssoc *FileAssoc::MatchGlobal(const std::string &file)
 {
-    for (size_t i = 0; i < g_options.assocs.size(); ++i)
+    return FileAssoc::Match(g_options.assocs, file);
+}
+/*static*/FileAssoc *FileAssoc::Match(const std::vector<FileAssoc*> &assocs, const std::string &file)
+{
+    for (size_t i = 0; i < assocs.size(); ++i)
     {
-        FileAssoc *assoc = g_options.assocs[i];
+        FileAssoc *assoc = assocs[i];
         if (regexec(assoc->regex, file.c_str(), 0, NULL, 0) == REG_NOERROR)
             return assoc;
     }
@@ -587,6 +659,7 @@ MainWnd::MainWnd(const std::string &lircFile)
     if (g_fullscreen)
         gtk_window_fullscreen(m_wnd);
     gtk_widget_show_all(m_wnd);
+    XResetScreenSaver(gdk_x11_get_default_xdisplay());
 
     if (!ChangeFavorite(1))
         ChangePath("/");
@@ -727,14 +800,15 @@ void MainWnd::Back()
         m_cwd = m_lister->Root();
         m_lister = &g_defaultLister;
     }
-    size_t slash = m_cwd == "/"? std::string::npos : m_cwd.rfind('/');
-    if (slash != std::string::npos)
+
+    std::string dirname = DirName(m_cwd);
+    if (!dirname.empty())
     {
-        std::string leaf = m_cwd.substr(slash + 1);
-        ChangePath(m_cwd.substr(0, slash));
+        std::string base = BaseName(m_cwd);
+        ChangePath(dirname);
         for (size_t i = 0; i < m_files.size(); ++i)
         {
-            if (m_files[i].fileName == leaf)
+            if (m_files[i].fileName == base)
             {
                 m_lineSel = i;
                 break;
@@ -811,7 +885,7 @@ void MainWnd::Open(const DirEntry &entry)
     if (g_verbose)
         std::cout << "Run " << fullPath << std::endl;
 
-    FileAssoc *assoc = m_lister->Match(entry);
+    FileAssoc *assoc = entry.assoc;
     if (!assoc)
     {
         if (g_verbose)
@@ -1072,6 +1146,8 @@ void MainWnd::OnLircCommand(const char *cmd)
         return;
     }
 
+    bool resetScreenSaver = true;
+
     if (strcmp(cmd, "up") == 0)
         Move(-1);
     else if (strcmp(cmd, "down") == 0)
@@ -1094,18 +1170,28 @@ void MainWnd::OnLircCommand(const char *cmd)
         ChangeFavorite(nfav);
     }
     else if (strcmp(cmd, "quit") == 0)
+    {
         gtk_main_quit();
+        resetScreenSaver = false;
+    }
     else
+    {
         if (g_verbose)
             std::cout << "Unknown cmd: " << cmd << std::endl;
+        resetScreenSaver = false;
+    }
+    if (resetScreenSaver)
+        XResetScreenSaver(gdk_x11_get_default_xdisplay());
 }
 
 class RCParser : public Simple_XML_Parser
 {
 private:
     enum State { TAG_CONFIG, TAG_FAVORITES, TAG_FILE_ASSOC, TAG_GRAPHICS, TAG_FONT, TAG_COLOR, TAG_FAVORITE, TAG_PATTERN };
+    Lister *m_curLister;
 public:
     RCParser()
+        :m_curLister(NULL)
     {
         SetStateNext(TAG_INIT, "config", TAG_CONFIG, NULL);
         {
@@ -1113,12 +1199,13 @@ public:
             {
                 SetStateNext(TAG_GRAPHICS, "font", TAG_FONT, "color", TAG_COLOR, NULL);
                 SetStateNext(TAG_FAVORITES, "favorite", TAG_FAVORITE, NULL);
+                    SetStateNext(TAG_FAVORITE, "file_assoc", TAG_FILE_ASSOC, NULL);
                 SetStateNext(TAG_FILE_ASSOC, "pattern", TAG_PATTERN, "extension", TAG_PATTERN, NULL);
             }
         }
         SetStateAttr(TAG_FONT, "name", "desc", NULL);
         SetStateAttr(TAG_COLOR, "name", "r", "g", "b", NULL);
-        SetStateAttr(TAG_FAVORITE, "num", "name", "path", "module", NULL);
+        SetStateAttr(TAG_FAVORITE, "num", "title", "path", "module", NULL);
         SetStateAttr(TAG_PATTERN, "match", "ext", "command", "killable", NULL);
     }
 protected:
@@ -1137,6 +1224,15 @@ protected:
             break;
         case TAG_PATTERN:
             ParsePattern(atts, name == "pattern");
+            break;
+        }
+    }
+    virtual void EndState(int state)
+    {
+        switch (state)
+        {
+        case TAG_FAVORITE:
+            m_curLister = NULL;
             break;
         }
     }
@@ -1168,15 +1264,20 @@ private:
         int id = atoi(num.c_str());
         if (id != 0)
         {
-            Lister *lister = NULL;
+            m_curLister = NULL;
             if (module.empty() || module == "file")
-                lister = new FileLister(id, name, path);
+                m_curLister = new FileLister(id, name, path);
             else if (module == "amule")
-                lister = new AmuleLister(id, path);
-            else if (module == "flash")
-                lister = new FlashLister(id);
-            if (lister)
-                g_options.favorites.push_back(lister);
+                m_curLister = new AmuleLister(id, path);
+            else if (module == "openedfiles")
+                m_curLister = new OpenedFileLister(id, GetExtraArg("title", "Opened"));
+            if (m_curLister)
+                g_options.favorites.push_back(m_curLister);
+            else
+            {
+                if (g_verbose)
+                    std::cout << "Unknown module '" << module << "'" << std::endl;
+            }
         }
     }
     void ParsePattern(const attributes_t &atts, bool isRegex)
@@ -1213,7 +1314,10 @@ private:
 
             if (!isFileArg)
                 assoc->args.push_back("{}");
-            g_options.assocs.push_back(assoc);
+            if (m_curLister)
+                m_curLister->AddAssoc(assoc);
+            else
+                g_options.assocs.push_back(assoc);
         }
         catch (...)
         {

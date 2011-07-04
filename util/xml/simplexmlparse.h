@@ -83,6 +83,18 @@ protected:
 
 //overridables
 protected:
+    typedef std::vector< std::pair<std::string, std::string> > extraArgs_t;
+    const extraArgs_t &ExtraArgs() const
+    {
+        return m_extraArgs;
+    }
+    std::string GetExtraArg(const std::string &name, const std::string &def)
+    {
+        for (size_t i = 0; i < m_extraArgs.size(); ++i)
+            if (m_extraArgs[i].first == name)
+                return m_extraArgs[i].second;
+        return def;
+    }
     virtual void StartState(int state, const std::string &name, const attributes_t &atts)
     {}
     virtual void EndState(int state)
@@ -101,6 +113,7 @@ protected:
     {
         int next = TAG_NONE;
         const StateDesc *top = Top();
+        m_extraArgs.clear();
         if (top)
         {
             std::string sname(name);
@@ -117,6 +130,8 @@ protected:
                     {
                         if (top->atts[i] == aname)
                             vatts[i] = aval;
+                        else
+                            m_extraArgs.push_back(std::make_pair(aname, aval));
                     }
                 }
                 StartState(next, sname, vatts);
@@ -201,6 +216,7 @@ private:
     std::vector<StateDesc>  m_stateMap;
     std::vector<int> m_stack;
     const StateDesc *m_top;
+    extraArgs_t m_extraArgs;
 };
 
 #endif /* SIMPLEXMLPARSE_H_INCLUDED */
