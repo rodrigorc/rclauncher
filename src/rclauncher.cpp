@@ -70,8 +70,8 @@ std::string BaseName(const std::string &file)
 
 std::string DirName(const std::string &file)
 {
-    if (file == "/")
-        return file;
+    if (file == "/" || file.empty())
+        return "/";
 
     size_t slash = file.rfind('/');
     if (slash == std::string::npos)
@@ -186,6 +186,73 @@ struct FileAssoc
     static FileAssoc *MatchGlobal(const std::string &file);
 };
 
+struct NameTrans
+{
+    RegEx regex;
+    bool global;
+    std::string to;
+
+    NameTrans(const char *sfrom, int cflags, bool cglobal, const char *sto)
+        :regex(sfrom, cflags), global(cglobal), to(sto)
+    {
+    }
+    std::string TransformName(const std::string &name) const;
+
+    static std::string TransformName(const std::vector<NameTrans*> &trans, const std::string &name);
+    static std::string TransformNameGlobal(const std::string &name);
+};
+
+std::string NameTrans::TransformName(const std::string &name) const
+{
+    regmatch_t matches[10];
+    std::string res(name);
+    size_t start = 0;
+    do
+    {
+        int nres = regexec(regex, res.c_str() + start, sizeof(matches) / sizeof(*matches), matches, 0);
+        if (nres != REG_NOERROR)
+            break;
+        std::string newName(res, 0, start + matches[0].rm_so);
+        size_t pos = 0;
+        for (;;)
+        {
+            size_t pos2 = to.find('\\', pos);
+            if (pos2 != std::string::npos)
+            {
+                newName += to.substr(pos, pos2 - pos);
+                if (pos2 + 1 < to.size())
+                {
+                    char ch = to[pos2 + 1];
+                    if (ch >= '0' && ch <= '9')
+                    {
+                        int idx = ch - '0';
+                        if (matches[idx].rm_so != -1)
+                            newName += res.substr(start + matches[idx].rm_so, matches[idx].rm_eo - matches[idx].rm_so);
+                    }
+                    else
+                        newName += ch;
+                }
+                else
+                {
+                    newName += '\\';
+                    break;
+                }
+            }
+            else
+            {
+                newName += to.substr(pos);
+                break;
+            }
+            pos = pos2 + 2;
+        }
+        res = newName + res.substr(start + matches[0].rm_eo);
+        start = newName.size();
+        if (matches[0].rm_so == matches[0].rm_eo)
+            if (++start >= res.size())
+                break;
+    } while (global);
+    return res;
+}
 
 struct DirEntry
 {
@@ -228,19 +295,27 @@ public:
     {
         for (size_t i = 0; i < m_assocs.size(); ++i)
             delete m_assocs[i];
+        for (size_t i = 0; i < m_nameTrans.size(); ++i)
+            delete m_nameTrans[i];
     }
     void AddAssoc(FileAssoc *fa)
     {
         m_assocs.push_back(fa);
     }
-
-
+    void AddNameTransform(NameTrans *nt)
+    {
+        m_nameTrans.push_back(nt);
+    }
     int Id()
     { return m_id; }
-    virtual std::string Title(const std::string &cwd) =0;
+
+    virtual std::string Title() =0;
     virtual std::string Root() =0;
-    virtual void ListDir(const std::string &path, std::vector<DirEntry> &files) =0;
-    virtual std::string ActualFile(const std::string &cwd, const DirEntry &entry) =0;
+    virtual void ChangePath(const DirEntry &entry) =0;
+    virtual void ChangePath(const std::string &path) =0;
+    virtual bool Back(std::string &prev) =0; //returns false if going back from root directory
+    virtual void ListDir(std::vector<DirEntry> &files) =0;
+    virtual std::string ActualFile(const DirEntry &entry) =0;
 
     virtual FileAssoc *Match(const std::string &file)
     { //By default, if any assocciation is defined use the local list.
@@ -250,32 +325,46 @@ public:
         else
             return FileAssoc::MatchGlobal(file);
     }
+
+    std::string TransformName(const std::string &name) const
+    {
+        if (!m_nameTrans.empty())
+            return NameTrans::TransformName(m_nameTrans, name);
+        else
+            return NameTrans::TransformNameGlobal(name);
+    }
+
 private:
     int m_id;
     std::vector<FileAssoc*> m_assocs;
+    std::vector<NameTrans*> m_nameTrans;
+    
 };
 
 class FileLister : public Lister
 {
 public:
     FileLister(int id, const std::string &title, const std::string &root)
-        :Lister(id), m_title(title), m_root(root)
+        :Lister(id), m_title(title), m_root(root), m_cwd("/")
     {}
 
-    std::string Title(const std::string &cwd)
+    std::string Title()
     {
         std::string res = m_title;
         if (!res.empty())
            res += ": ";
-        res += cwd;
+        res += m_cwd;
         return res;
     }
     std::string Root()
     { return m_root; }
-    void ListDir(const std::string &path, std::vector<DirEntry> &files);
-    virtual std::string ActualFile(const std::string &cwd, const DirEntry &entry)
+    virtual void ChangePath(const DirEntry &entry);
+    virtual void ChangePath(const std::string &path);
+    virtual bool Back(std::string &prev);
+    virtual void ListDir(std::vector<DirEntry> &files);
+    virtual std::string ActualFile(const DirEntry &entry)
     {
-        std::string fullPath = cwd;
+        std::string fullPath = m_cwd;
         if (fullPath != "/")
             fullPath += "/";
         fullPath += entry.fileName;
@@ -283,13 +372,34 @@ public:
     }
 private:
     std::string m_title, m_root;
+    std::string m_cwd; //relative to m_root
 };
 
 FileLister g_defaultLister(0, "", "/");
 
-void FileLister::ListDir(const std::string &path, std::vector<DirEntry> &files)
+void FileLister::ChangePath(const DirEntry &entry)
 {
-    std::string realPath = m_root + path;
+    if (m_cwd == "/")
+        m_cwd.clear(); //to avoid the double /
+    m_cwd = m_cwd + "/" + entry.fileName;
+}
+void FileLister::ChangePath(const std::string &path)
+{
+    m_cwd = path;
+}
+
+bool FileLister::Back(std::string &prev)
+{
+    if (m_cwd == "/")
+        return false;
+    prev = BaseName(m_cwd);
+    m_cwd = DirName(m_cwd);
+    return true;
+}
+
+void FileLister::ListDir(std::vector<DirEntry> &files)
+{
+    std::string realPath = m_root + m_cwd;
     if (realPath != "/" && realPath != "//")
         files.push_back(DirEntry("..", "..", NULL, true));
 
@@ -337,7 +447,10 @@ void FileLister::ListDir(const std::string &path, std::vector<DirEntry> &files)
         {
             FileAssoc *assoc = Match(name);
             if (assoc)
-                files.push_back(DirEntry(name, name, assoc, false));
+            {
+                std::string disp = TransformName(name);
+                files.push_back(DirEntry(disp, name, assoc, false));
+            }
         }
     }
 
@@ -350,18 +463,24 @@ public:
     OpenedFileLister(int id, const std::string &title)
         :Lister(id), m_title(title)
     {}
-    virtual std::string Title(const std::string &) 
+    virtual std::string Title() 
     { return m_title; }
     virtual std::string Root()
     { return ""; }
-    virtual void ListDir(const std::string &path, std::vector<DirEntry> &files);
-    virtual std::string ActualFile(const std::string &cwd, const DirEntry &entry)
+    virtual bool Back(std::string &prev)
+    { return false; }
+    virtual void ChangePath(const DirEntry &entry)
+    {}
+    virtual void ChangePath(const std::string &path)
+    {}
+    virtual void ListDir(std::vector<DirEntry> &files);
+    virtual std::string ActualFile(const DirEntry &entry)
     { return entry.fileName; }
 private:
     std::string m_title;
 };
 
-void OpenedFileLister::ListDir(const std::string &path, std::vector<DirEntry> &files)
+void OpenedFileLister::ListDir(std::vector<DirEntry> &files)
 {
     OpenDir proc("/proc");
     if (!proc)
@@ -409,18 +528,24 @@ public:
     AmuleLister(int id, const std::string &root)
         :Lister(id), m_root(root)
     {}
-    virtual std::string Title(const std::string &) 
+    virtual std::string Title() 
     { return "aMule"; }
     virtual std::string Root()
     { return ""; }
-    virtual void ListDir(const std::string &path, std::vector<DirEntry> &files);
-    virtual std::string ActualFile(const std::string &cwd, const DirEntry &entry)
+    virtual bool Back(std::string &prev)
+    { return false; }
+    virtual void ChangePath(const DirEntry &entry)
+    {}
+    virtual void ChangePath(const std::string &path)
+    {}
+    virtual void ListDir(std::vector<DirEntry> &files);
+    virtual std::string ActualFile(const DirEntry &entry)
     { return entry.fileName; }
 private:
     std::string m_root;
 };
 
-void AmuleLister::ListDir(const std::string &, std::vector<DirEntry> &files)
+void AmuleLister::ListDir(std::vector<DirEntry> &files)
 {
     OpenDir dir(m_root);
     if (!dir)
@@ -562,12 +687,15 @@ struct Options
 {
     GraphicOptions gr;
     std::vector<FileAssoc*> assocs;
+    std::vector<NameTrans*> nameTrans;
     std::vector<Lister*> favorites;
 
     ~Options()
     {
         for (size_t i = 0; i < assocs.size(); ++i)
             delete assocs[i];
+        for (size_t i = 0; i < nameTrans.size(); ++i)
+            delete nameTrans[i];
         for (size_t i = 0; i < favorites.size(); ++i)
             delete favorites[i];
     }
@@ -588,6 +716,22 @@ struct Options
     return NULL;
 }
 
+/*static*/std::string NameTrans::TransformName(const std::vector<NameTrans*> &trans, const std::string &name)
+{
+    std::string res(name);
+    for (size_t i = 0; i < trans.size(); ++i)
+    {
+        const NameTrans &re = *trans[i];
+        res = re.TransformName(res);
+    }
+    return res;
+}
+
+/*static*/std::string NameTrans::TransformNameGlobal(const std::string &name)
+{
+    return NameTrans::TransformName(g_options.nameTrans, name);
+}
+
 class MainWnd : private ILircClient
 {
 public:
@@ -598,7 +742,6 @@ private:
     GtkDrawingAreaPtr m_draw;
     LircClient m_lirc;
     Lister *m_lister;
-    std::string m_cwd; //relative to m_lister
     int m_lineSel, m_firstLine, m_nLines;
     std::vector<DirEntry> m_files;
     GPid m_childPid;
@@ -622,7 +765,6 @@ private:
     void Select(bool onlyDir);
     void Back();
     void Refresh();
-    void ChangePath(const std::string &path, bool findFav = true);
     bool ChangeFavorite(int nfav);
     void Open(const DirEntry &entry);
     void OnChildWatch(GPid pid, gint status);
@@ -661,8 +803,9 @@ MainWnd::MainWnd(const std::string &lircFile)
     gtk_widget_show_all(m_wnd);
     XResetScreenSaver(gdk_x11_get_default_xdisplay());
 
-    if (!ChangeFavorite(1))
-        ChangePath("/");
+    //if (!ChangeFavorite(1))
+    //    ChangePath("/");
+    ChangeFavorite(1);
 }
 
 gboolean MainWnd::OnDrawKey(GtkWidget *w, GdkEventKey *e)
@@ -777,9 +920,8 @@ void MainWnd::Select(bool onlyDir)
         }
         else
         {
-            if (m_cwd == "/")
-                m_cwd.clear(); //to avoid the double /
-            ChangePath(m_cwd + "/" + entry.fileName); //TODO: virtualyze
+            m_lister->ChangePath(entry);
+            Refresh();
         }
     }
     else if (!onlyDir)
@@ -790,71 +932,35 @@ void MainWnd::Select(bool onlyDir)
 
 void MainWnd::Refresh()
 {
-    ChangePath(m_cwd);
-}
-
-void MainWnd::Back()
-{
-    if (m_cwd == "/")
-    {
-        m_cwd = m_lister->Root();
-        m_lister = &g_defaultLister;
-    }
-
-    std::string dirname = DirName(m_cwd);
-    if (!dirname.empty())
-    {
-        std::string base = BaseName(m_cwd);
-        ChangePath(dirname);
-        for (size_t i = 0; i < m_files.size(); ++i)
-        {
-            if (m_files[i].fileName == base)
-            {
-                m_lineSel = i;
-                break;
-            }
-        }
-    }
-    else
-    {
-        ChangePath("/");
-    }
-}
-
-void MainWnd::ChangePath(const std::string &path, bool findFav /*=true*/)
-{
-    //g_print("ChangePath '%s' -> '%s'\n", m_cwd.c_str(), path.c_str());
-    m_cwd = path;
-
-    if (findFav)
-    {
-        std::string realPath = m_lister->Root() + path;
-        for (size_t i = 0; i < g_options.favorites.size(); ++i)
-        {
-            const std::string &root = g_options.favorites[i]->Root();
-            if (root.empty())
-                continue;
-            if (root == path.substr(0, root.size()))
-            {
-                m_lister = g_options.favorites[i];
-                m_cwd = path.substr(root.size());
-                break;
-            }
-        }
-    }
-    if (m_cwd.empty())
-        m_cwd = "/";
-
-    //remove the ending /'s
-    while (m_cwd.size() > 1 && m_cwd[m_cwd.size() - 1] == '/')
-        m_cwd = m_cwd.substr(0, m_cwd.size() - 1);
-
     m_files.clear();
-    m_lister->ListDir(m_cwd, m_files);
+    m_lister->ListDir(m_files);
     m_lineSel = m_firstLine = 0;
     m_nLines = 1;
 
     Redraw();
+}
+
+void MainWnd::Back()
+{
+    std::string base;
+    if (!m_lister->Back(base))
+    {
+        std::string cwd = m_lister->Root();
+        base = BaseName(cwd);
+        cwd = DirName(cwd);
+        m_lister = &g_defaultLister;
+        m_lister->ChangePath(cwd);
+    }
+    Refresh();
+
+    for (size_t i = 0; i < m_files.size(); ++i)
+    {
+        if (m_files[i].fileName == base)
+        {
+            m_lineSel = i;
+            break;
+        }
+    }
 }
 
 bool MainWnd::ChangeFavorite(int nfav)
@@ -869,7 +975,9 @@ bool MainWnd::ChangeFavorite(int nfav)
         return false;
 
     m_lister = g_options.favorites[i];
-    ChangePath("/", false);
+    m_lister->ChangePath("/");
+    Refresh();
+
     return true;
 }
 
@@ -881,7 +989,7 @@ static void SetupSpawnedEnviron(gpointer data)
 
 void MainWnd::Open(const DirEntry &entry)
 {
-    std::string fullPath = m_lister->ActualFile(m_cwd, entry);
+    std::string fullPath = m_lister->ActualFile(entry);
     if (g_verbose)
         std::cout << "Run " << fullPath << std::endl;
 
@@ -1098,7 +1206,7 @@ void MainWnd::OnDrawCairo(cairo_t *cr, int width, int height)
     pango_layout_set_font_description(layout, m_fontTitle);
     pango_layout_set_width(layout, (szW + scrollW) * PANGO_SCALE);
 
-    std::string title = m_lister->Title(m_cwd);
+    std::string title = m_lister->Title();
     pango_layout_set_text(layout, title.data(), title.size());
 
     cairo_set_matrix(cr, &matrix);
@@ -1187,7 +1295,7 @@ void MainWnd::OnLircCommand(const char *cmd)
 class RCParser : public Simple_XML_Parser
 {
 private:
-    enum State { TAG_CONFIG, TAG_FAVORITES, TAG_FILE_ASSOC, TAG_GRAPHICS, TAG_FONT, TAG_COLOR, TAG_FAVORITE, TAG_PATTERN };
+    enum State { TAG_CONFIG, TAG_FAVORITES, TAG_FILE_ASSOC, TAG_NAME, TAG_GRAPHICS, TAG_FONT, TAG_COLOR, TAG_FAVORITE, TAG_PATTERN, TAG_NAME_TRANSFORM };
     Lister *m_curLister;
 public:
     RCParser()
@@ -1195,18 +1303,23 @@ public:
     {
         SetStateNext(TAG_INIT, "config", TAG_CONFIG, NULL);
         {
-            SetStateNext(TAG_CONFIG, "graphics", TAG_GRAPHICS, "favorites", TAG_FAVORITES, "file_assoc", TAG_FILE_ASSOC, NULL);
+            SetStateNext(TAG_CONFIG, "graphics", TAG_GRAPHICS, "favorites", TAG_FAVORITES, 
+                    "file_assoc", TAG_FILE_ASSOC, "name", TAG_NAME, NULL);
             {
                 SetStateNext(TAG_GRAPHICS, "font", TAG_FONT, "color", TAG_COLOR, NULL);
                 SetStateNext(TAG_FAVORITES, "favorite", TAG_FAVORITE, NULL);
-                    SetStateNext(TAG_FAVORITE, "file_assoc", TAG_FILE_ASSOC, NULL);
+                {
+                    SetStateNext(TAG_FAVORITE, "file_assoc", TAG_FILE_ASSOC, "name", TAG_NAME, NULL);
+                }
                 SetStateNext(TAG_FILE_ASSOC, "pattern", TAG_PATTERN, "extension", TAG_PATTERN, NULL);
+                SetStateNext(TAG_NAME, "transform", TAG_NAME_TRANSFORM, NULL);
             }
         }
         SetStateAttr(TAG_FONT, "name", "desc", NULL);
         SetStateAttr(TAG_COLOR, "name", "r", "g", "b", NULL);
         SetStateAttr(TAG_FAVORITE, "num", "title", "path", "module", NULL);
         SetStateAttr(TAG_PATTERN, "match", "ext", "command", "killable", NULL);
+        SetStateAttr(TAG_NAME_TRANSFORM, "regex", "to", "flags", NULL);
     }
 protected:
     virtual void StartState(int state, const std::string &name, const attributes_t &atts)
@@ -1224,6 +1337,9 @@ protected:
             break;
         case TAG_PATTERN:
             ParsePattern(atts, name == "pattern");
+            break;
+        case TAG_NAME_TRANSFORM:
+            ParseNameTransform(atts);
             break;
         }
     }
@@ -1322,6 +1438,30 @@ private:
         catch (...)
         {
             delete assoc;
+        }
+    }
+    void ParseNameTransform(const attributes_t &atts)
+    {
+        NameTrans *nt = NULL;
+        try
+        {
+            const std::string &regex = atts[0], &to = atts[1], &flags = atts[2];
+            int cflags = 0;
+            if (flags.find('n') == std::string::npos)
+                cflags = REG_EXTENDED; //default
+            if (flags.find('i') != std::string::npos)
+                cflags |= REG_ICASE;
+            bool global = flags.find('g') != std::string::npos;
+
+            nt = new NameTrans(regex.c_str(), cflags, global, to.c_str());
+            if (m_curLister)
+                m_curLister->AddNameTransform(nt);
+            else
+                g_options.nameTrans.push_back(nt);
+        }
+        catch (...)
+        {
+            delete nt;
         }
     }
 };
