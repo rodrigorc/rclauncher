@@ -205,52 +205,65 @@ struct NameTrans
 std::string NameTrans::TransformName(const std::string &name) const
 {
     regmatch_t matches[10];
-    std::string res(name);
-    size_t start = 0;
+    std::string res;
+    size_t start = 0, last = 0;
+    bool prevEmpty = true;
     do
     {
-        int nres = regexec(regex, res.c_str() + start, sizeof(matches) / sizeof(*matches), matches, 0);
+        int nres = regexec(regex, name.c_str() + start, sizeof(matches) / sizeof(*matches), matches, start? REG_NOTBOL : 0);
         if (nres != REG_NOERROR)
             break;
-        std::string newName(res, 0, start + matches[0].rm_so);
-        size_t pos = 0;
-        for (;;)
-        {
-            size_t pos2 = to.find('\\', pos);
-            if (pos2 != std::string::npos)
+        if (!(matches[0].rm_eo == 0 && !prevEmpty))
+        { //Do not replace empty matches if the previous one was non-empty
+            res += name.substr(start, matches[0].rm_so);
+            size_t pos = 0;
+            for (;;)
             {
-                newName += to.substr(pos, pos2 - pos);
-                if (pos2 + 1 < to.size())
+                size_t pos2 = to.find('\\', pos);
+                if (pos2 != std::string::npos)
                 {
-                    char ch = to[pos2 + 1];
-                    if (ch >= '0' && ch <= '9')
+                    res += to.substr(pos, pos2 - pos);
+                    if (pos2 + 1 < to.size())
                     {
-                        int idx = ch - '0';
-                        if (matches[idx].rm_so != -1)
-                            newName += res.substr(start + matches[idx].rm_so, matches[idx].rm_eo - matches[idx].rm_so);
+                        char ch = to[pos2 + 1];
+                        if (ch >= '0' && ch <= '9')
+                        {
+                            int idx = ch - '0';
+                            if (matches[idx].rm_so != -1)
+                                res += name.substr(start + matches[idx].rm_so, matches[idx].rm_eo - matches[idx].rm_so);
+                        }
+                        else
+                            res += ch;
                     }
                     else
-                        newName += ch;
+                    {
+                        res += '\\';
+                        break;
+                    }
                 }
                 else
                 {
-                    newName += '\\';
+                    res += to.substr(pos);
                     break;
                 }
+                pos = pos2 + 2;
             }
-            else
-            {
-                newName += to.substr(pos);
-                break;
-            }
-            pos = pos2 + 2;
         }
-        res = newName + res.substr(start + matches[0].rm_eo);
-        start = newName.size();
-        if (matches[0].rm_so == matches[0].rm_eo)
-            if (++start >= res.size())
-                break;
-    } while (global);
+        if (matches[0].rm_eo > 0)
+        {
+            start += matches[0].rm_eo;
+            prevEmpty = false;
+        }
+        else
+        { //If an empty match is found advance just one char or else we'll get stuck in an infinite loop
+            res += name[start];
+            start += 1;
+            prevEmpty = true;
+        }
+        last = start;
+    } while (global && start <= name.size());
+    if (last < name.size())
+        res += name.substr(last);
     return res;
 }
 
