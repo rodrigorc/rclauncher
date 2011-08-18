@@ -311,6 +311,13 @@ public:
     }
 };
 
+//Similar to Borrow.
+template<typename T, typename F, typename P> BorrowWrapper<T> Cast(GPtr<T,F,P> &p)
+{
+    return BorrowWrapper<T>(p);
+}
+
+//Operator overload for the GPtr
 template<typename T, typename P, typename F> bool operator==(const GPtr<T,F,P> &a, const GPtr<T,F,P> &b)
 {
     return a.Obj() == b.Obj();
@@ -744,157 +751,154 @@ template<typename T> struct MiGLibFunctions
     MIGLIB_CONNECT_2(src, "notify", void, GObject*, GParamSpec*, cls, func, ptr)
 
 
-
-class AutoSource
+class AutoSourceBase
 {
 public:
-    guint AddIdle(GSourceFunc fun, gpointer ptr, gint priority=G_PRIORITY_DEFAULT_IDLE)
+    AutoSourceBase()
+        :m_source(0)
     {
-        InfoSrcS *info = new InfoSrcS(this, fun, ptr);
-        m_infos.push_back(info);
-        info->id = g_idle_add_full(priority, 
-                MIGLIB_IDLE_FUNC(InfoSrcS, Call), info,
-                MIGLIB_DESTROY_NOTIFY_FUNC(InfoSrcS, OnDestroy));
-        return info->id;
     }
-    guint AddTimeout(gint timeout, GSourceFunc fun, gpointer ptr, gint priority=G_PRIORITY_DEFAULT)
+    ~AutoSourceBase()
     {
-        InfoSrcS *info = new InfoSrcS(this, fun, ptr);
-        m_infos.push_back(info);
-        info->id = g_timeout_add_full(priority, timeout, 
-                MIGLIB_TIMEOUT_FUNC(InfoSrcS, Call), info,
-                MIGLIB_DESTROY_NOTIFY_FUNC(InfoSrcS, OnDestroy));
-        return info->id;
+        if (m_source != 0)
+            g_source_remove(m_source);
     }
-    guint AddTimeoutSeconds(gint timeout, GSourceFunc fun, gpointer ptr, gint priority=G_PRIORITY_DEFAULT)
-    {
-        InfoSrcS *info = new InfoSrcS(this, fun, ptr);
-        m_infos.push_back(info);
-        info->id = g_timeout_add_seconds_full(priority, timeout, 
-                MIGLIB_TIMEOUT_FUNC(InfoSrcS, Call), info,
-                MIGLIB_DESTROY_NOTIFY_FUNC(InfoSrcS, OnDestroy));
-        return info->id;
-    }
-    guint AddIOWatch(GIOChannel *channel, GIOCondition cond, GIOFunc fun, gpointer ptr, gint priority=G_PRIORITY_DEFAULT)
-    {
-        InfoSrcIO *info = new InfoSrcIO(this, fun, ptr);
-        m_infos.push_back(info);
-        info->id = g_io_add_watch_full(channel, priority, cond, 
-                MIGLIB_IO_WATCH_FUNC(InfoSrcIO, CallIO), info,
-                MIGLIB_DESTROY_NOTIFY_FUNC(InfoSrcIO, OnDestroy));
-        return info->id;
-    }
-    guint AddChildWatch(GPid pid, GChildWatchFunc fun, gpointer ptr, gint priority=G_PRIORITY_DEFAULT)
-    {
-        InfoSrcChild *info = new InfoSrcChild(this, fun, ptr);
-        m_infos.push_back(info);
-        info->id = g_child_watch_add_full(priority, pid, 
-                MIGLIB_CHILD_WATCH_FUNC(InfoSrcChild, CallChild), info,
-                MIGLIB_DESTROY_NOTIFY_FUNC(InfoSrcChild, OnDestroy));
-        return info->id;
-    }
-
-    AutoSource()
-    {}
     void Reset()
     {
-        std::vector<InfoSrc*> infos;
-        infos.swap(m_infos);
-        for (size_t i=0; i<infos.size(); ++i)
-            g_source_remove(infos[i]->id);
+        if (m_source != 0)
+        {
+            g_source_remove(m_source);
+            m_source = 0;
+        }
     }
-    ~AutoSource()
+    int GetSource() const
     {
-        Reset();
+        return m_source;
+    }
+    bool IsActive() const
+    {
+        return m_source != 0;
     }
 private:
-    AutoSource(const AutoSource&); //nocopy
-    void operator=(const AutoSource&); //nocopy
-    struct InfoSrc
-    {
-    public:
-        guint id;
-    private:
-        AutoSource *obj;
-    protected:
-        InfoSrc(AutoSource *a)
-            :id(0), obj(a)
-        {
-        }
-        void OnDestroy()
-        { //subclasses should redefine this
-            for (size_t i=0; i < obj->m_infos.size(); ++i)
-            {
-                if (obj->m_infos[i] == this)
-                {
-                    obj->m_infos[i] = obj->m_infos.back();
-                    obj->m_infos.pop_back();
-                    break;
-                }
-            }
-            //subclasses should do "delete this". It is not here to avoid the virtual destructor
-        }
-    };
-    std::vector<InfoSrc*> m_infos;
+    AutoSourceBase(const AutoSourceBase &); //nocopy
+    void operator=(const AutoSourceBase &); //nocopy
 
-    struct InfoSrcS : public InfoSrc
-    {
-        GSourceFunc fun;
-        gpointer data;
+protected:
+    gint m_source;
+    gpointer m_data;
 
-        InfoSrcS(AutoSource *a, GSourceFunc f, gpointer d)
-            :InfoSrc(a), fun(f), data(d)
-        {
-        }
-        void OnDestroy()
-        {
-            InfoSrc::OnDestroy();
-            delete this;
-        }
-        gboolean Call()
-        {
-            return fun(data);
-        }
-    };
-    struct InfoSrcIO : public InfoSrc
+    //This helper struct manages the case that the source is changed from the callback
+    struct GuardSource
     {
-        GIOFunc fun;
-        gpointer data;
-
-        InfoSrcIO(AutoSource *a, GIOFunc f, gpointer d)
-            :InfoSrc(a), fun(f), data(d)
+        int *psource;
+        int prev;
+        GuardSource(AutoSourceBase *b)
+            :psource(&b->m_source), prev(*psource)
         {
         }
-        void OnDestroy()
+        gboolean Check(gboolean res)
         {
-            InfoSrc::OnDestroy();
-            delete this;
-        }
-        gboolean CallIO(GIOChannel *source, GIOCondition cond)
-        {
-            return fun(source, cond, data);
-        }
-    };
-    struct InfoSrcChild : public InfoSrc
-    {
-        GChildWatchFunc fun;
-        gpointer data;
-
-        InfoSrcChild(AutoSource *a, GChildWatchFunc f, gpointer d)
-            :InfoSrc(a), fun(f), data(d)
-        {
-        }
-        void OnDestroy()
-        {
-            InfoSrc::OnDestroy();
-            delete this;
-        }
-        void CallChild(GPid pid, gint status)
-        {
-            fun(pid, status, data);
+            if (!res && prev == *psource)
+                *psource = 0;
+            return res;
         }
     };
 };
+
+class AutoTimeout : public AutoSourceBase
+{
+public:
+    void SetTimeout(gint timeout, GSourceFunc func, gpointer data)
+    {
+        if (m_source != 0)
+            g_source_remove(m_source);
+        m_func = func;
+        m_data = data;
+        m_source = g_timeout_add(timeout, OnTimeout, this);
+    }
+    void SetTimeoutSeconds(gint timeout, GSourceFunc func, gpointer data)
+    {
+        if (m_source != 0)
+            g_source_remove(m_source);
+        m_func = func;
+        m_data = data;
+        m_source = g_timeout_add_seconds(timeout, OnTimeout, this);
+    }
+private:
+    GSourceFunc m_func;
+    static gboolean OnTimeout(gpointer data)
+    {
+        AutoTimeout *that = static_cast<AutoTimeout*>(data);
+        GuardSource guard(that);
+        return guard.Check(that->m_func(that->m_data));
+    }
+};
+
+class AutoIdle : public AutoSourceBase
+{
+public:
+    void SetIdle(GSourceFunc func, gpointer data)
+    {
+        if (m_source != 0)
+            g_source_remove(m_source);
+        m_func = func;
+        m_data = data;
+        m_source = g_idle_add(OnIdle, this);
+    }
+private:
+    GSourceFunc m_func;
+    static gboolean OnIdle(gpointer data)
+    {
+        AutoIdle *that = static_cast<AutoIdle*>(data);
+        GuardSource guard(that);
+        return guard.Check(that->m_func(that->m_data));
+    }
+};
+
+class AutoIOWatch : public AutoSourceBase
+{
+public:
+    void SetIOWatch(GIOChannel *channel, GIOCondition cond, GIOFunc func, gpointer data)
+    {
+        if (m_source != 0)
+            g_source_remove(m_source);
+        m_func = func;
+        m_data = data;
+        m_source = g_io_add_watch(channel, cond, OnIOWatch, this);
+    }
+private:
+    GIOFunc m_func;
+    static gboolean OnIOWatch(GIOChannel *source, GIOCondition cond, gpointer data)
+    {
+        AutoIOWatch *that = static_cast<AutoIOWatch*>(data);
+        GuardSource guard(that);
+        return guard.Check(that->m_func(source, cond, that->m_data));
+    }
+};
+
+class AutoChildWatch : public AutoSourceBase
+{
+public:
+    void SetChildWatch(GPid pid, GChildWatchFunc func, gpointer data)
+    {
+        if (m_source != 0)
+            g_source_remove(m_source);
+        m_func = func;
+        m_data = data;
+        m_source = g_child_watch_add(pid, OnChildWatch, this);
+    }
+private:
+    GChildWatchFunc m_func;
+    static void OnChildWatch(GPid pid, gint status, gpointer data)
+    {
+        AutoChildWatch *that = static_cast<AutoChildWatch*>(data);
+        GuardSource guard(that);
+        that->m_func(pid, status, that->m_data);
+        guard.Check(FALSE);
+    }
+};
+
+//////////////////////
 
 //The standard GObject ref-counting
 struct GObjectPtrTraits

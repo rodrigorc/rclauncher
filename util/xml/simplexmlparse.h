@@ -78,7 +78,10 @@ protected:
     }
     int State() const
     {
-        return m_stack.back();
+        if (m_stack.empty())
+            return TAG_NONE;
+        else
+            return m_stack.back();
     }
 
 //overridables

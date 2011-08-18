@@ -11,6 +11,8 @@
 #endif
 
 //GtkWidget
+//In GTK2 "destroy" is actually a signal of GtkObject, not GtkWidget.
+//Just pretend that it is here for compatibility with GTK3
 #define MIGTK_WIDGET_destroy(obj, cls, fun, ptr) \
     MIGLIB_CONNECT_1(obj, "destroy", void, GtkWidget*, cls, fun, ptr)
 #define MIGTK_WIDGET_button_press_event(obj, cls, fun, ptr) \
@@ -239,8 +241,9 @@
     MIGLIB_CONNECT_1(obj, "activate", void, GtkAction*, cls, fun, ptr)
 
 //GtkButton
-#define MIGTK_BUTTON_activate(obj, cls, fun, ptr) \
-    MIGLIB_CONNECT_1(obj, "activate", void, GtkButton*, cls, fun, ptr)
+//Do not connect to this signal
+/*#define MIGTK_BUTTON_activate(obj, cls, fun, ptr) \
+    MIGLIB_CONNECT_1(obj, "activate", void, GtkButton*, cls, fun, ptr)*/
 #define MIGTK_BUTTON_clicked(obj, cls, fun, ptr) \
     MIGLIB_CONNECT_1(obj, "clicked", void, GtkButton*, cls, fun, ptr)
 #define MIGTK_BUTTON_enter(obj, cls, fun, ptr) \
@@ -261,8 +264,9 @@
     MIGLIB_CONNECT_2(obj, "populate_popup", void, GtkLabel*, GtkMenu, cls, fun, ptr)
 
 //GtkEntry
-#define MIGTK_ENTRY_activate(obj, cls, fun, ptr) \
- MIGLIB_CONNECT_1(obj, "activate", void, GtkEntry*, cls, fun, ptr)
+//Do no connect to this signal
+/*#define MIGTK_ENTRY_activate(obj, cls, fun, ptr) \
+    MIGLIB_CONNECT_1(obj, "activate", void, GtkEntry*, cls, fun, ptr)*/
 #define MIGTK_ENTRY_move_cursor(obj, cls, fun, ptr) \
  MIGLIB_CONNECT_4(obj, "move_cursor", void, GtkEntry*, GtkMovementStep, gint , gboolean, cls, fun, ptr)
 #define MIGTK_ENTRY_insert_at_cursor(obj, cls, fun, ptr) \
