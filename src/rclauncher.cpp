@@ -1,3 +1,9 @@
+/*
+rclauncher: a small program to launch multimedia files using a LIRC remote control.
+
+Copyright (C) 2011 Rodrigo Rivas Costa <rodrigorivascosta@gmail.com>
+*/
+
 #include "config.h"
 #include <lirc/lirc_client.h>
 #include <stdlib.h>
