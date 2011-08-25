@@ -321,6 +321,10 @@ public:
     {
         m_assocs.push_back(fa);
     }
+    void AddDefaultAssoc()
+    {
+        m_assocs.push_back(NULL);
+    }
     void AddNameTransform(NameTrans *nt)
     {
         m_nameTrans.push_back(nt);
@@ -337,12 +341,8 @@ public:
     virtual std::string ActualFile(const DirEntry &entry) =0;
 
     virtual FileAssoc *Match(const std::string &file)
-    { //By default, if any assocciation is defined use the local list.
-      //If no associations in this lister, the default list is used.
-        if (!m_assocs.empty())
-            return FileAssoc::Match(m_assocs, file);
-        else
-            return FileAssoc::MatchGlobal(file);
+    {
+        return FileAssoc::Match(m_assocs, file);
     }
 
     std::string TransformName(const std::string &name) const
@@ -355,6 +355,7 @@ public:
 
 private:
     int m_id;
+    //Smart hack: A NULL value in the m_assocs vector means to search into MatchGlobal recursively.
     std::vector<FileAssoc*> m_assocs;
     std::vector<NameTrans*> m_nameTrans;
     
@@ -726,11 +727,26 @@ struct Options
 }
 /*static*/FileAssoc *FileAssoc::Match(const std::vector<FileAssoc*> &assocs, const std::string &file)
 {
+    bool isGlobal = &g_options.assocs == &assocs;
+
+    //If no associations are defined use the default
+    if (!isGlobal && assocs.empty())
+        return MatchGlobal(file);
+
     for (size_t i = 0; i < assocs.size(); ++i)
     {
         FileAssoc *assoc = assocs[i];
-        if (regexec(assoc->regex, file.c_str(), 0, NULL, 0) == REG_NOERROR)
-            return assoc;
+        if (assoc)
+        {
+            if (regexec(assoc->regex, file.c_str(), 0, NULL, 0) == REG_NOERROR)
+                return assoc;
+        }
+        else if (!isGlobal)
+        {
+            assoc = MatchGlobal(file);
+            if (assoc)
+                return assoc;
+        }
     }
     return NULL;
 }
@@ -1314,7 +1330,7 @@ void MainWnd::OnLircCommand(const char *cmd)
 class RCParser : public Simple_XML_Parser
 {
 private:
-    enum State { TAG_CONFIG, TAG_FAVORITES, TAG_FILE_ASSOC, TAG_NAME, TAG_GRAPHICS, TAG_FONT, TAG_COLOR, TAG_FAVORITE, TAG_PATTERN, TAG_NAME_TRANSFORM };
+    enum State { TAG_CONFIG, TAG_FAVORITES, TAG_FILE_ASSOC, TAG_NAME, TAG_GRAPHICS, TAG_FONT, TAG_COLOR, TAG_FAVORITE, TAG_PATTERN, TAG_DEFAULT, TAG_NAME_TRANSFORM };
     Lister *m_curLister;
 public:
     RCParser()
@@ -1328,9 +1344,10 @@ public:
                 SetStateNext(TAG_GRAPHICS, "font", TAG_FONT, "color", TAG_COLOR, NULL);
                 SetStateNext(TAG_FAVORITES, "favorite", TAG_FAVORITE, NULL);
                 {
-                    SetStateNext(TAG_FAVORITE, "file_assoc", TAG_FILE_ASSOC, "name", TAG_NAME, NULL);
+                    SetStateNext(TAG_FAVORITE, 
+                            "file_assoc", TAG_FILE_ASSOC, "name", TAG_NAME, NULL);
                 }
-                SetStateNext(TAG_FILE_ASSOC, "pattern", TAG_PATTERN, "extension", TAG_PATTERN, NULL);
+                SetStateNext(TAG_FILE_ASSOC, "pattern", TAG_PATTERN, "extension", TAG_PATTERN, "default", TAG_DEFAULT, NULL);
                 SetStateNext(TAG_NAME, "transform", TAG_NAME_TRANSFORM, NULL);
             }
         }
@@ -1356,6 +1373,10 @@ protected:
             break;
         case TAG_PATTERN:
             ParsePattern(atts, name == "pattern");
+            break;
+        case TAG_DEFAULT:
+            if (m_curLister)
+                m_curLister->AddDefaultAssoc();
             break;
         case TAG_NAME_TRANSFORM:
             ParseNameTransform(atts);
