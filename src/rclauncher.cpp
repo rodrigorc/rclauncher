@@ -14,6 +14,7 @@ Copyright (C) 2011 Rodrigo Rivas Costa <rodrigorivascosta@gmail.com>
 #include <dirent.h>
 #include <string.h>
 #include <stdint.h>
+#include <getopt.h>
 
 #include <regex.h>
 #include <wordexp.h>
@@ -25,7 +26,6 @@ Copyright (C) 2011 Rodrigo Rivas Costa <rodrigorivascosta@gmail.com>
 
 #include <gdk/gdkx.h>
 #include "miglib/migtk.h"
-#include "miglib/migtkconn.h"
 #include "miglib/mipango.h"
 #include "micairo.h"
 #include <gdk/gdkkeysyms.h>
@@ -92,6 +92,8 @@ using namespace miglib;
 
 bool g_verbose = false;
 bool g_fullscreen = true;
+bool g_hideOnRun = false;
+std::string g_geometry;
 
 struct ILircClient
 {
@@ -681,7 +683,7 @@ next:;
 
 struct GraphicOptions
 {
-    std::string descFont, descFontTitle;
+    std::string descFont, descFontTitle, descFontQueue;
     struct Color
     {
         double r, g, b;
@@ -691,13 +693,15 @@ struct GraphicOptions
             cairo_set_source_rgb(cr, r, g, b);
         }
     };
-    Color colorFg, colorBg, colorScroll;
+    Color colorFg, colorFgQ, colorBg, colorScroll;
 
     GraphicOptions()
     {
         descFont = "Sans 24";
         descFontTitle = "Sans Bold 40";
+        descFontQueue = "Sans 16";
         colorFg.r = colorFg.g = colorFg.b = 1;
+        colorFgQ.r = colorFgQ.g = 1; colorFgQ.b = 0.5;
         colorBg.r = colorBg.g = colorBg.b = 0;
         colorScroll.r = colorScroll.g = colorScroll.b = 0.75;
     }
@@ -779,11 +783,15 @@ private:
     Lister *m_lister;
     int m_lineSel, m_firstLine, m_nLines;
     std::vector<DirEntry> m_files;
+    std::vector<int> m_playQueue;
     GPid m_childPid;
     std::string m_childText;
     bool m_isKillable;
 
-    PangoFontDescriptionPtr m_font, m_fontTitle;
+    AutoTimeout m_timeoutSpawned;
+    gboolean OnTimeoutSpawned();
+
+    PangoFontDescriptionPtr m_font, m_fontTitle, m_fontQueue;
 
     void OnDestroy(GtkWidget *w)
     {
@@ -796,12 +804,16 @@ private:
 #endif
     void OnDrawCairo(cairo_t *cr, int width, int height);
     gboolean OnDrawKey(GtkWidget *w, GdkEventKey *e);
+    int PositionInQueue(int line);
     void Move(int inc);
     void Select(bool onlyDir);
+    void Queue();
+    void Unqueue();
     void Back();
     void Refresh();
     bool ChangeFavorite(int nfav);
     void Open(const DirEntry &entry);
+    void AfterRun();
     void OnChildWatch(GPid pid, gint status);
 
     void Redraw();
@@ -835,7 +847,12 @@ MainWnd::MainWnd(const std::string &lircFile)
 
     if (g_fullscreen)
         gtk_window_fullscreen(m_wnd);
-    gtk_widget_show_all(m_wnd);
+
+    gtk_widget_show_all(m_draw);
+    if (!g_geometry.empty())
+        gtk_window_parse_geometry(m_wnd, g_geometry.c_str());
+    gtk_widget_show(m_wnd);
+
     XResetScreenSaver(gdk_x11_get_default_xdisplay());
 
     //if (!ChangeFavorite(1))
@@ -882,6 +899,14 @@ gboolean MainWnd::OnDrawKey(GtkWidget *w, GdkEventKey *e)
     case GDK_KEY_KP_Enter:
         Select(false);
         break;
+    case GDK_KEY_KP_Add:
+    case GDK_KEY_plus:
+        Queue();
+        break;
+    case GDK_KEY_KP_Subtract:
+    case GDK_KEY_minus:
+        Unqueue();
+        break;
     case GDK_KEY_space:
         Refresh();
         break;
@@ -926,10 +951,19 @@ gboolean MainWnd::OnDrawKey(GtkWidget *w, GdkEventKey *e)
         ChangeFavorite(10); 
         break;
     default:
-        //std::cout << "Key: " << std::hex << e->keyval << std::dec << std::endl;
+        if (g_verbose)
+            std::cout << "Unknown Key: 0x" << std::hex << e->keyval << std::dec << std::endl;
         break;
     }
     return TRUE;
+}
+
+int MainWnd::PositionInQueue(int line)
+{
+    std::vector<int>::iterator itQueue = std::find(m_playQueue.begin(), m_playQueue.end(), line);
+    if (itQueue == m_playQueue.end())
+        return -1;
+    return itQueue - m_playQueue.begin();
 }
 
 void MainWnd::Move(int inc)
@@ -944,6 +978,12 @@ void MainWnd::Move(int inc)
 
 void MainWnd::Select(bool onlyDir)
 {
+    if (!onlyDir && !m_playQueue.empty())
+    {
+        AfterRun();
+        return;
+    }
+
     if (m_lineSel < 0 || m_lineSel >= static_cast<int>(m_files.size()))
         return;
     const DirEntry &entry = m_files[m_lineSel];
@@ -965,9 +1005,39 @@ void MainWnd::Select(bool onlyDir)
     }
 }
 
+void MainWnd::Queue()
+{
+    if (m_lineSel < 0 || m_lineSel >= static_cast<int>(m_files.size()))
+        return;
+    const DirEntry &entry = m_files[m_lineSel];
+    if (entry.isDir)
+        return;
+    if (PositionInQueue(m_lineSel) != -1)
+        return;
+
+    m_playQueue.push_back(m_lineSel);
+    Redraw();
+}
+
+void MainWnd::Unqueue()
+{
+    if (m_lineSel < 0 || m_lineSel >= static_cast<int>(m_files.size()))
+        return;
+    const DirEntry &entry = m_files[m_lineSel];
+    if (entry.isDir)
+        return;
+    int pos = PositionInQueue(m_lineSel);
+    if (pos == -1)
+        return;
+
+    m_playQueue.erase(m_playQueue.begin() + pos);
+    Redraw();
+}
+
 void MainWnd::Refresh()
 {
     m_files.clear();
+    m_playQueue.clear();
     m_lister->ListDir(m_files);
     m_lineSel = m_firstLine = 0;
     m_nLines = 1;
@@ -1033,6 +1103,7 @@ void MainWnd::Open(const DirEntry &entry)
     {
         if (g_verbose)
             std::cout << "No assoc!"<< std::endl;
+        AfterRun();
         return;
     }
     if (g_verbose)
@@ -1056,6 +1127,7 @@ void MainWnd::Open(const DirEntry &entry)
         //This should not happend, but just in case...
         if (g_verbose)
             std::cout << "Empty command!" << std::endl;
+        AfterRun();
         return;
     }
     gboolean res;
@@ -1069,7 +1141,21 @@ void MainWnd::Open(const DirEntry &entry)
         m_childText = entry.dispName;
         m_isKillable = assoc->isKillable;
         Redraw();
+
+        if (g_hideOnRun)
+            m_timeoutSpawned.SetTimeout(15000, MIGLIB_TIMEOUT_FUNC(MainWnd, OnTimeoutSpawned), this);
     }
+    else
+    {
+        AfterRun();
+    }
+        
+}
+
+gboolean MainWnd::OnTimeoutSpawned()
+{
+    gtk_widget_hide(m_wnd);
+    return FALSE;
 }
 
 void MainWnd::OnChildWatch(GPid pid, gint status)
@@ -1080,9 +1166,25 @@ void MainWnd::OnChildWatch(GPid pid, gint status)
     {
         m_childPid = 0;
         m_childText.clear();
+        if (g_hideOnRun)
+        {
+            m_timeoutSpawned.Reset();
+            gtk_widget_show(m_wnd);
+        }
         Redraw();
     }
     g_spawn_close_pid(pid);
+    AfterRun();
+}
+
+void MainWnd::AfterRun()
+{
+    if (!m_playQueue.empty())
+    {
+        int q = m_playQueue[0];
+        m_playQueue.erase(m_playQueue.begin());
+        Open(m_files[q]);
+    }
 }
 
 #if GTK_MAJOR_VERSION < 3
@@ -1113,10 +1215,14 @@ void MainWnd::OnDrawCairo(cairo_t *cr, int width, int height)
     PangoLayoutPtr layout(pango_cairo_create_layout(cr));
     pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_MIDDLE);
 
+    PangoLayoutPtr layoutQueue(pango_cairo_create_layout(cr));
+    
     if (!m_font)
         m_font.Reset(pango_font_description_from_string(g_options.gr.descFont.c_str()));
     if (!m_fontTitle)
         m_fontTitle.Reset(pango_font_description_from_string(g_options.gr.descFontTitle.c_str()));
+    if (!m_fontQueue)
+        m_fontQueue.Reset(pango_font_description_from_string(g_options.gr.descFontQueue.c_str()));
     
     pango_layout_set_text(layout, "M", 1);
     PangoRectangle baseRect;
@@ -1129,6 +1235,9 @@ void MainWnd::OnDrawCairo(cairo_t *cr, int width, int height)
 
     pango_layout_set_font_description(layout, m_font);
     pango_layout_get_extents(layout, NULL, &baseRect);
+
+    pango_layout_set_font_description(layoutQueue, m_fontQueue);
+    pango_layout_set_alignment(layoutQueue, PANGO_ALIGN_CENTER);
 
     //lineH is the height of a line in the file list
     double lineH = double(baseRect.height) / PANGO_SCALE;
@@ -1145,7 +1254,8 @@ void MainWnd::OnDrawCairo(cairo_t *cr, int width, int height)
     szH = m_nLines * lineH;
     marginY2 = height - (marginY1 + szH);
 
-    g_options.gr.colorFg.set_source(cr);
+    GraphicOptions::Color &fg = m_playQueue.empty()? g_options.gr.colorFg : g_options.gr.colorFgQ;
+    fg.set_source(cr);
     cairo_translate(cr, marginX1, marginY1);
 
     cairo_matrix_t matrix;
@@ -1167,14 +1277,14 @@ void MainWnd::OnDrawCairo(cairo_t *cr, int width, int height)
         g_options.gr.colorScroll.set_source(cr);
         cairo_rectangle(cr, szW, thumbY, scrollW, thumbH);
         cairo_fill(cr);
-        g_options.gr.colorFg.set_source(cr);
+        fg.set_source(cr);
     }
     else
     {
         g_options.gr.colorBg.set_source(cr);
         cairo_rectangle(cr, szW, 0, scrollW, szH);
         cairo_fill(cr);
-        g_options.gr.colorFg.set_source(cr);
+        fg.set_source(cr);
     }
     cairo_rectangle(cr, 0, 0, szW, szH);
     cairo_rectangle(cr, szW, 0, scrollW, szH);
@@ -1184,14 +1294,31 @@ void MainWnd::OnDrawCairo(cairo_t *cr, int width, int height)
     {
         const DirEntry &entry = m_files[nLine];
 
-        pango_layout_set_text(layout, entry.dispName.data(), entry.dispName.size());
         if (static_cast<int>(nLine) == m_lineSel)
         {
-            g_options.gr.colorFg.set_source(cr);
+            fg.set_source(cr);
             cairo_rectangle(cr, 0, 0, szW, lineH);
             cairo_fill(cr);
             g_options.gr.colorBg.set_source(cr);
         }
+
+        double extraMargin = 0;
+        int idQueue = PositionInQueue(nLine);
+        if (idQueue != -1)
+        {
+            cairo_rectangle(cr, 2, 2, DELTA_X - 4, lineH - 4);
+            cairo_stroke(cr);
+            extraMargin += DELTA_X;
+            std::ostringstream os;
+            os << (idQueue + 1);
+            std::string sn = os.str();
+            pango_layout_set_text(layoutQueue, sn.data(), sn.size());
+            pango_layout_set_width(layoutQueue, DELTA_X);
+            cairo_translate(cr, DELTA_X/2, 0);
+            pango_cairo_show_layout(cr, layoutQueue);
+            cairo_translate(cr, -DELTA_X/2, 0);
+        }
+
         if (entry.isDir)
         {
             //A small ugly folder. It is designed with a lineH size of 37, 
@@ -1213,29 +1340,27 @@ void MainWnd::OnDrawCairo(cairo_t *cr, int width, int height)
             cairo_set_line_width(cr, 2);
             cairo_scale(cr, 37.0 / lineH, 37.0 / lineH);
 
-            //Move forward to draw the text
-            cairo_translate(cr, DELTA_X, 0);
-            pango_layout_set_width(layout, (szW - DELTA_X) * PANGO_SCALE);
+            extraMargin += DELTA_X;
         }
         else
         {
             //If no icon, only a quarter of the DELTA_X space is left
             //Currently only directories have icon, so...
-            cairo_translate(cr, DELTA_X / 4, 0);
-            pango_layout_set_width(layout, (szW - DELTA_X / 4) * PANGO_SCALE);
+            extraMargin += DELTA_X / 4;
         }
+        //Move forward to draw the text
+        cairo_translate(cr, extraMargin, 0);
+        pango_layout_set_text(layout, entry.dispName.data(), entry.dispName.size());
+        pango_layout_set_width(layout, (szW - extraMargin) * PANGO_SCALE);
 
         //The name itself
         pango_cairo_show_layout(cr, layout);
 
         if (static_cast<int>(nLine) == m_lineSel)
-            g_options.gr.colorFg.set_source(cr);
+            fg.set_source(cr);
 
         //Advance to the next line
-        if (entry.isDir)
-            cairo_translate(cr, -DELTA_X, lineH);
-        else
-            cairo_translate(cr, -DELTA_X / 4, lineH);
+        cairo_translate(cr, -extraMargin, lineH);
     }
 
     pango_layout_set_font_description(layout, m_fontTitle);
@@ -1268,7 +1393,7 @@ void MainWnd::OnDrawCairo(cairo_t *cr, int width, int height)
         cairo_rectangle(cr, 0, 0, childW, childH);
         g_options.gr.colorBg.set_source(cr);
         cairo_fill_preserve(cr);
-        g_options.gr.colorFg.set_source(cr);
+        fg.set_source(cr);
         cairo_stroke(cr);
         cairo_translate(cr, marginChildW, marginChildH);
         pango_cairo_show_layout(cr, layout);
@@ -1284,8 +1409,14 @@ void MainWnd::OnLircCommand(const char *cmd)
 {
     if (m_childPid != 0)
     {
-        if (m_isKillable && m_childPid && strcmp(cmd, "kill") == 0)
-            kill(m_childPid, SIGTERM);
+        if (strcmp(cmd, "kill") == 0)
+        {
+            m_playQueue.clear();
+            if (m_isKillable)
+            {
+                kill(m_childPid, SIGTERM);
+            }
+        }
         return;
     }
 
@@ -1307,6 +1438,10 @@ void MainWnd::OnLircCommand(const char *cmd)
         Back();
     else if (strcmp(cmd, "refresh") == 0)
         Refresh();
+    else if (strcmp(cmd, "queue") == 0)
+        Queue();
+    else if (strcmp(cmd, "unqueue") == 0)
+        Unqueue();
     else if (strlen(cmd) > 4 && memcmp(cmd, "fav ", 4) == 0)
     {
         int nfav = atoi(cmd + 4);
@@ -1401,6 +1536,8 @@ private:
             g_options.gr.descFont = desc;
         else if (name == "title")
             g_options.gr.descFontTitle = desc;
+        else if (name == "queue")
+            g_options.gr.descFontQueue = desc;
     }
     void ParseColor(const attributes_t &atts)
     {
@@ -1413,6 +1550,8 @@ private:
             g_options.gr.colorBg = color;
         else if (name == "scroll")
             g_options.gr.colorScroll = color;
+        else if (name == "queue")
+            g_options.gr.colorFgQ = color;
     }
     void ParseFavorite(const attributes_t &atts)
     {
@@ -1526,6 +1665,7 @@ static void Help(char *argv0)
     << "\t    is (~/.rclauncher).\n"
     << "\t-v  Verbose: output some information to the terminal.\n"
     << "\t-f  Do not go fullscreen.\n"
+    << "\t-d  Hide rclauncher while running the a parogram.\n"
     << std::endl;
 }
 
@@ -1543,7 +1683,12 @@ int main(int argc, char **argv)
         std::string lircFile;
 
         int op;
-        while ((op = getopt(argc, argv, "hc:l:vf")) != -1)
+        struct option longopts[] =
+        {
+            {"geometry", required_argument, NULL, 'g'},
+            {NULL}
+        };
+        while ((op = getopt_long_only(argc, argv, "hc:l:vfd", longopts, NULL)) != -1)
         {
             switch (op)
             {
@@ -1562,6 +1707,12 @@ int main(int argc, char **argv)
                 break;
             case 'f':
                 g_fullscreen = false;
+                break;
+            case 'd':
+                g_hideOnRun = true;
+                break;
+            case 'g':
+                g_geometry = optarg;
                 break;
             }
         }

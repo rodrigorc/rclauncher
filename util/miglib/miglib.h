@@ -64,6 +64,7 @@ public:
     }
 };
 
+//TestGError steals the error reference if thrown
 inline void TestGError(GError *&error, const char *str = NULL)
 {
     if (error != NULL)
@@ -99,7 +100,7 @@ public:
     {
         return m_error;
     }
-    GError *operator->()
+    GError *operator->() const
     {
         return m_error;
     }
@@ -115,6 +116,11 @@ public:
             g_error_free(m_error);
             m_error = NULL;
         }
+    }
+    void Reset(GError *e = NULL)
+    {
+        Clear();
+        m_error = e;
     }
 };
 
@@ -162,10 +168,21 @@ template<typename T> struct BorrowWrapper
         :ptr(p)
     {}
 };
-
 template<typename T> BorrowWrapper<T> Borrow(T *p)
 {
     return BorrowWrapper<T>(p);
+}
+
+template<typename T> struct NewWrapper
+{
+    T *ptr;
+    explicit NewWrapper(T *p)
+        :ptr(p)
+    {}
+};
+template<typename T> NewWrapper<T> New(T *p)
+{
+    return NewWrapper<T>(p);
 }
 
 template <typename T, typename F, typename P=GPtrCast<T> >
@@ -211,7 +228,7 @@ public:
             this->Follow();
         }
     }
-    explicit GPtr(BorrowWrapper<T> ptr) //borrowed reference
+    GPtr(BorrowWrapper<T> ptr) //borrowed reference
     {
         if (SetObj(ptr.ptr))
         {
@@ -219,7 +236,7 @@ public:
             this->Follow();
         }
     }
-    template <typename Q> explicit GPtr(BorrowWrapper<Q> ptr) //borrowed reference
+    template <typename Q> GPtr(BorrowWrapper<Q> ptr) //borrowed reference
     {
         if (SetObj(CheckCast<T,Q>::CastChecked(ptr.ptr)))
         {
@@ -235,6 +252,15 @@ public:
             this->Follow();
         }
     }
+    template<typename QT, typename QP> GPtr(GPtr<QT,traits_type,QP> &o)
+    {
+        T *t = Borrow<T>(o);
+        if (t)
+        {
+            traits_type::Ref(Obj());
+            this->Follow();
+        }
+    }
     ~GPtr()
     {
         if (Obj()) 
@@ -245,23 +271,42 @@ public:
     }
     void Reset(T *ptr = NULL) //new reference
     {
+        operator=(New(ptr));
+    }
+    template <typename Q> void Reset(Q *ptr) //new reference
+    {
+        operator=(New(ptr));
+    }
+    const GPtr &operator=(const GPtr &o)
+    { //The reference is borrowed, because 'o' is already wrapped
+        return operator=(Borrow<T>(o));
+        return *this;
+    }
+    template <typename Q, typename QP> const GPtr &operator=(const GPtr<Q,traits_type,QP> &o)
+    { //The argument must use the same 'traits_type'. Also, Q must be convertible to T.
+      //The reference is borrowed, because 'o' is already wrapped
+        return operator=(Borrow<T>(o));
+    }
+    const GPtr &operator=(NewWrapper<T> ptr) //new reference
+    {
         T *prev = Obj();
         if (prev)
             this->Unfollow();
-        if (SetObj(ptr))
+        if (SetObj(ptr.ptr))
         {
             this->Init();
             this->Follow();
         }
         if (prev)
             traits_type::Unref(prev);
+        return *this;
     }
-    template <typename Q> void Reset(Q *ptr) //new reference
+    template <typename Q> const GPtr &operator=(NewWrapper<Q> ptr) //new reference
     {
-        T *t = CheckCast<T,Q>::CastChecked(ptr);
-        Reset(t);
+        T *t = CheckCast<T,Q>::CastChecked(ptr.ptr);
+        return operator=(New<T>(t));
     }
-    void Reset(BorrowWrapper<T> ptr) //borrowed reference
+    const GPtr &operator=(BorrowWrapper<T> ptr) //borrowed reference
     {
         T *prev = Obj();
         if (prev)
@@ -273,21 +318,12 @@ public:
         }
         if (prev)
             traits_type::Unref(prev);
+        return *this;
     }
-    template <typename Q> void Reset(BorrowWrapper<Q> ptr) //borrowed reference
+    template <typename Q> const GPtr &operator=(BorrowWrapper<Q> ptr) //borrowed reference
     {
         T *t = CheckCast<T,Q>::CastChecked(ptr.ptr);
-        Reset(BorrowWrapper<T>(t));
-    }
-    const GPtr &operator=(const GPtr &o)
-    {
-        if (Obj()) this->Unfollow();
-
-        if (o.Obj()) traits_type::Ref(o.Obj());
-        if (Obj()) traits_type::Unref(Obj());
-        if (SetObj(o.Obj()))
-            this->Follow();
-        return *this;
+        return operator=(BorrowWrapper<T>(t));
     }
     T *operator->() const
     {
@@ -311,7 +347,7 @@ public:
     }
 };
 
-//Similar to Borrow.
+//Similar to Borrow(T*). but using a GPtr
 template<typename T, typename F, typename P> BorrowWrapper<T> Cast(GPtr<T,F,P> &p)
 {
     return BorrowWrapper<T>(p);
@@ -639,84 +675,158 @@ template<typename T> struct MiGLibFunctions
 };
 
 #define MIGLIB_FUNC_0(R, cls, func) \
-    ((R (*)(gpointer))(&::miglib::MiGLibFunctions<cls>::Static0<R, &cls::func>))
+    static_cast<R (*)(gpointer)>(&::miglib::MiGLibFunctions<cls>::Static0<R, &cls::func>)
 
 #define MIGLIB_FUNC_1(R, A, cls, func) \
-    ((R (*)(A,gpointer))(&::miglib::MiGLibFunctions<cls>::Static1<R, A, &cls::func>))
+    static_cast<R (*)(A,gpointer)>(&::miglib::MiGLibFunctions<cls>::Static1<R, A, &cls::func>)
 
 #define MIGLIB_FUNC_2(R, A, B, cls, func) \
-    ((R (*)(A,B,gpointer))(&::miglib::MiGLibFunctions<cls>::Static2<R, A, B, &cls::func>))
+    static_cast<R (*)(A,B,gpointer)>(&::miglib::MiGLibFunctions<cls>::Static2<R, A, B, &cls::func>)
 
 #define MIGLIB_FUNC_3(R, A, B, C, cls, func) \
-    ((R (*)(A,B,C,gpointer))(&::miglib::MiGLibFunctions<cls>::Static3<R, A, B, C, &cls::func>))
+    static_cast<R (*)(A,B,C,gpointer)>(&::miglib::MiGLibFunctions<cls>::Static3<R, A, B, C, &cls::func>)
 
 #define MIGLIB_FUNC_4(R, A, B, C, D, cls, func) \
-    ((R (*)(A,B,C,D,gpointer))(&::miglib::MiGLibFunctions<cls>::Static4<R, A, B, C, D, &cls::func>))
+    static_cast<R (*)(A,B,C,D,gpointer)>(&::miglib::MiGLibFunctions<cls>::Static4<R, A, B, C, D, &cls::func>)
 
 #define MIGLIB_FUNC_5(R, A, B, C, D, E, cls, func) \
-    ((R (*)(A,B,C,D,E,gpointer))(&::miglib::MiGLibFunctions<cls>::Static5<R, A, B, C, D, E, &cls::func>))
+    static_cast<R (*)(A,B,C,D,E,gpointer)>(&::miglib::MiGLibFunctions<cls>::Static5<R, A, B, C, D, E, &cls::func>)
 
 #define MIGLIB_FUNC_6(R, A, B, C, D, E, F, cls, func) \
-    ((R (*)(A,B,C,D,E,F,gpointer))(&::miglib::MiGLibFunctions<cls>::Static6<R, A, B, C, D, E, F, &cls::func>))
+    static_cast<R (*)(A,B,C,D,E,F,gpointer)>(&::miglib::MiGLibFunctions<cls>::Static6<R, A, B, C, D, E, F, &cls::func>)
 
 #define MIGLIB_FUNC_7(R, A, B, C, D, E, F, G, cls, func) \
-    ((R (*)(A,B,C,D,E,F,G,gpointer))(&::miglib::MiGLibFunctions<cls>::Static7<R, A, B, C, D, E, F, G, &cls::func>))
+    static_cast<R (*)(A,B,C,D,E,F,G,gpointer)>(&::miglib::MiGLibFunctions<cls>::Static7<R, A, B, C, D, E, F, G, &cls::func>)
+
+#define MIGLIB_SFUNC_0(R, func) \
+    static_cast<R (*)(gpointer)>(func)
+
+#define MIGLIB_SFUNC_1(R, A, func) \
+    static_cast<R (*)(A,gpointer)>(func)
+
+#define MIGLIB_SFUNC_2(R, A, B, func) \
+    static_cast<R (*)(A,B,gpointer)>(func)
+
+#define MIGLIB_SFUNC_3(R, A, B, C, func) \
+    static_cast<R (*)(A,B,C,gpointer)>(func)
+
+#define MIGLIB_SFUNC_4(R, A, B, C, D, func) \
+    static_cast<R (*)(A,B,C,D,gpointer)>(func)
+
+#define MIGLIB_SFUNC_5(R, A, B, C, D, E, func) \
+    static_cast<R (*)(A,B,C,D,E,gpointer)>(func)
+
+#define MIGLIB_SFUNC_6(R, A, B, C, D, E, F, func) \
+    static_cast<R (*)(A,B,C,D,E,F,gpointer)>(func)
+
+#define MIGLIB_SFUNC_7(R, A, B, C, D, E, F, G, func) \
+    static_cast<R (*)(A,B,C,D,E,F,G,gpointer)>(func)
 
 ////
 
 #define MIGLIB_FUNCTION(R, cls, func) \
     MIGLIB_FUNC_0(R, cls, func)
+#define MIGLIB_SFUNCTION(R, func) \
+    MIGLIB_SFUNC_0(R, func)
 
 #define MIGLIB_SIGNAL_FUNC_0(R, cls, func) \
-    GCallback(MIGLIB_FUNC_0(R, cls, func))
+    reinterpret_cast<GCallback>(MIGLIB_FUNC_0(R, cls, func))
 
 #define MIGLIB_SIGNAL_FUNC_1(R, A, cls, func) \
-    GCallback(MIGLIB_FUNC_1(R, A, cls, func))
+    reinterpret_cast<GCallback>(MIGLIB_FUNC_1(R, A, cls, func))
 
 #define MIGLIB_SIGNAL_FUNC_2(R, A, B, cls, func) \
-    GCallback(MIGLIB_FUNC_2(R, A, B, cls, func))
+    reinterpret_cast<GCallback>(MIGLIB_FUNC_2(R, A, B, cls, func))
 
 #define MIGLIB_SIGNAL_FUNC_3(R, A, B, C, cls, func) \
-    GCallback(MIGLIB_FUNC_3(R, A, B, C, cls, func))
+    reinterpret_cast<GCallback>(MIGLIB_FUNC_3(R, A, B, C, cls, func))
 
 #define MIGLIB_SIGNAL_FUNC_4(R, A, B, C, D, cls, func) \
-    GCallback(MIGLIB_FUNC_4(R, A, B, C, D, cls, func))
+    reinterpret_cast<GCallback>(MIGLIB_FUNC_4(R, A, B, C, D, cls, func))
 
 #define MIGLIB_SIGNAL_FUNC_5(R, A, B, C, D, E, cls, func) \
-    GCallback(MIGLIB_FUNC_5(R, A, B, C, D, E, cls, func))
+    reinterpret_cast<GCallback>(MIGLIB_FUNC_5(R, A, B, C, D, E, cls, func))
 
 #define MIGLIB_SIGNAL_FUNC_6(R, A, B, C, D, E, F, cls, func) \
-    GCallback(MIGLIB_FUNC_6(R, A, B, C, D, E, F, cls, func))
+    reinterpret_cast<GCallback>(MIGLIB_FUNC_6(R, A, B, C, D, E, F, cls, func))
 
 #define MIGLIB_SIGNAL_FUNC_7(R, A, B, C, D, E, F, G, cls, func) \
-    GCallback(MIGLIB_FUNC_7(R, A, B, C, D, E, F, G, cls, func))
+    reinterpret_cast<GCallback>(MIGLIB_FUNC_7(R, A, B, C, D, E, F, G, cls, func))
+
+#define MIGLIB_SIGNAL_SFUNC_0(R, func) \
+    reinterpret_cast<GCallback>(MIGLIB_SFUNC_0(R, func))
+
+#define MIGLIB_SIGNAL_SFUNC_1(R, A, func) \
+    reinterpret_cast<GCallback>(MIGLIB_SFUNC_1(R, A, func))
+
+#define MIGLIB_SIGNAL_SFUNC_2(R, A, B, func) \
+    reinterpret_cast<GCallback>(MIGLIB_SFUNC_2(R, A, B, func))
+
+#define MIGLIB_SIGNAL_SFUNC_3(R, A, B, C, func) \
+    reinterpret_cast<GCallback>(MIGLIB_SFUNC_3(R, A, B, C, func))
+
+#define MIGLIB_SIGNAL_SFUNC_4(R, A, B, C, D, func) \
+    reinterpret_cast<GCallback>(MIGLIB_SFUNC_4(R, A, B, C, D, func))
+
+#define MIGLIB_SIGNAL_SFUNC_5(R, A, B, C, D, E, func) \
+    reinterpret_cast<GCallback>(MIGLIB_SFUNC_5(R, A, B, C, D, E, func))
+
+#define MIGLIB_SIGNAL_SFUNC_6(R, A, B, C, D, E, F, func) \
+    reinterpret_cast<GCallback>(MIGLIB_SFUNC_6(R, A, B, C, D, E, F, func))
+
+#define MIGLIB_SIGNAL_SFUNC_7(R, A, B, C, D, E, F, G, func) \
+    reinterpret_cast<GCallback>(MIGLIB_SFUNC_7(R, A, B, C, D, E, F, G, func))
 
 ////////////////////////////////////
 //Signals
 
 #define MIGLIB_CONNECT_0(src, sig, R, cls, func, ptr) \
-    g_signal_connect(G_OBJECT(src), sig, MIGLIB_SIGNAL_FUNC_0(R, cls, func), static_cast<cls*>(ptr))
+    g_signal_connect(src, sig, MIGLIB_SIGNAL_FUNC_0(R, cls, func), static_cast<cls*>(ptr))
 
 #define MIGLIB_CONNECT_1(src, sig, R, A, cls, func, ptr) \
-    g_signal_connect(G_OBJECT(src), sig, MIGLIB_SIGNAL_FUNC_1(R, A, cls, func), static_cast<cls*>(ptr))
+    g_signal_connect(src, sig, MIGLIB_SIGNAL_FUNC_1(R, A, cls, func), static_cast<cls*>(ptr))
 
 #define MIGLIB_CONNECT_2(src, sig, R, A, B, cls, func, ptr) \
-    g_signal_connect(G_OBJECT(src), sig, MIGLIB_SIGNAL_FUNC_2(R, A, B, cls, func), static_cast<cls*>(ptr))
+    g_signal_connect(src, sig, MIGLIB_SIGNAL_FUNC_2(R, A, B, cls, func), static_cast<cls*>(ptr))
 
 #define MIGLIB_CONNECT_3(src, sig, R, A, B, C, cls, func, ptr) \
-    g_signal_connect(G_OBJECT(src), sig, MIGLIB_SIGNAL_FUNC_3(R, A, B, C, cls, func), static_cast<cls*>(ptr))
+    g_signal_connect(src, sig, MIGLIB_SIGNAL_FUNC_3(R, A, B, C, cls, func), static_cast<cls*>(ptr))
 
 #define MIGLIB_CONNECT_4(src, sig, R, A, B, C, D, cls, func, ptr) \
-    g_signal_connect(G_OBJECT(src), sig, MIGLIB_SIGNAL_FUNC_4(R, A, B, C, D, cls, func), static_cast<cls*>(ptr))
+    g_signal_connect(src, sig, MIGLIB_SIGNAL_FUNC_4(R, A, B, C, D, cls, func), static_cast<cls*>(ptr))
 
 #define MIGLIB_CONNECT_5(src, sig, R, A, B, C, D, E, cls, func, ptr) \
-    g_signal_connect(G_OBJECT(src), sig, MIGLIB_SIGNAL_FUNC_5(R, A, B, C, D, E, cls, func), static_cast<cls*>(ptr))
+    g_signal_connect(src, sig, MIGLIB_SIGNAL_FUNC_5(R, A, B, C, D, E, cls, func), static_cast<cls*>(ptr))
 
 #define MIGLIB_CONNECT_6(src, sig, R, A, B, C, D, E, F, cls, func, ptr) \
-    g_signal_connect(G_OBJECT(src), sig, MIGLIB_SIGNAL_FUNC_6(R, A, B, C, D, E, F, cls, func), static_cast<cls*>(ptr))
+    g_signal_connect(src, sig, MIGLIB_SIGNAL_FUNC_6(R, A, B, C, D, E, F, cls, func), static_cast<cls*>(ptr))
 
 #define MIGLIB_CONNECT_7(src, sig, R, A, B, C, D, E, F, G, cls, func, ptr) \
-    g_signal_connect(G_OBJECT(src), sig, MIGLIB_SIGNAL_FUNC_7(R, A, B, C, D, E, F, G, cls, func), static_cast<cls*>(ptr))
+    g_signal_connect(src, sig, MIGLIB_SIGNAL_FUNC_7(R, A, B, C, D, E, F, G, cls, func), static_cast<cls*>(ptr))
+
+#define MIGLIB_SCONNECT_0(src, sig, R, func, ptr) \
+    g_signal_connect(src, sig, MIGLIB_SIGNAL_SFUNC_0(R, func), ptr)
+
+#define MIGLIB_SCONNECT_1(src, sig, R, A, func, ptr) \
+    g_signal_connect(src, sig, MIGLIB_SIGNAL_SFUNC_1(R, A, func), ptr)
+
+#define MIGLIB_SCONNECT_2(src, sig, R, A, B, func, ptr) \
+    g_signal_connect(src, sig, MIGLIB_SIGNAL_SFUNC_2(R, A, B, func), ptr)
+
+#define MIGLIB_SCONNECT_3(src, sig, R, A, B, C, func, ptr) \
+    g_signal_connect(src, sig, MIGLIB_SIGNAL_SFUNC_3(R, A, B, C, func), ptr)
+
+#define MIGLIB_SCONNECT_4(src, sig, R, A, B, C, D, func, ptr) \
+    g_signal_connect(src, sig, MIGLIB_SIGNAL_SFUNC_4(R, A, B, C, D, func), ptr)
+
+#define MIGLIB_SCONNECT_5(src, sig, R, A, B, C, D, E, func, ptr) \
+    g_signal_connect(src, sig, MIGLIB_SIGNAL_SFUNC_5(R, A, B, C, D, E, func), ptr)
+
+#define MIGLIB_SCONNECT_6(src, sig, R, A, B, C, D, E, F, func, ptr) \
+    g_signal_connect(src, sig, MIGLIB_SIGNAL_SFUNC_6(R, A, B, C, D, E, F, func), ptr)
+
+#define MIGLIB_SCONNECT_7(src, sig, R, A, B, C, D, E, F, G, func, ptr) \
+    g_signal_connect(src, sig, MIGLIB_SIGNAL_SFUNC_7(R, A, B, C, D, E, F, G, func), ptr)
 
 
 
@@ -730,19 +840,36 @@ template<typename T> struct MiGLibFunctions
 #define MIGLIB_TIMEOUT_ADD_SECONDS(to, cls, func, ptr)  \
     g_timeout_add_seconds(to, MIGLIB_TIMEOUT_FUNC(cls, func), static_cast<cls*>(ptr))
 
+#define MIGLIB_TIMEOUT_SFUNC(func) MIGLIB_SFUNCTION(gboolean, func)
+#define MIGLIB_S_TIMEOUT_ADD(to, func, ptr)  \
+    g_timeout_add(to, MIGLIB_TIMEOUT_SFUNC(func), ptr)
+
+#define MIGLIB_S_TIMEOUT_ADD_SECONDS(to, func, ptr)  \
+    g_timeout_add_seconds(to, MIGLIB_TIMEOUT_SFUNC(func), ptr)
+
 #define MIGLIB_IDLE_FUNC(cls, func) MIGLIB_FUNCTION(gboolean, cls, func)
 #define MIGLIB_IDLE_ADD(cls, func, ptr)  \
     g_idle_add(MIGLIB_IDLE_FUNC(cls, func), static_cast<cls*>(ptr))
+
+#define MIGLIB_IDLE_SFUNC(func) MIGLIB_SFUNCTION(gboolean, func)
+#define MIGLIB_S_IDLE_ADD(ptr)  \
+    g_idle_add(MIGLIB_IDLE_SFUNC(func), ptr)
 
 #define MIGLIB_IO_WATCH_FUNC(cls, func) MIGLIB_FUNC_2(gboolean, GIOChannel*, GIOCondition, cls, func)
 #define MIGLIB_IO_ADD_WATCH(io, cond, cls, func, ptr) \
     g_io_add_watch(io, static_cast<GIOCondition>(cond), MIGLIB_IO_WATCH_FUNC(cls, func), static_cast<cls*>(ptr))
 
+#define MIGLIB_IO_WATCH_SFUNC(func) MIGLIB_SFUNC_2(gboolean, GIOChannel*, GIOCondition, func)
+#define MIGLIB_S_IO_ADD_WATCH(io, cond, func, ptr) \
+    g_io_add_watch(io, static_cast<GIOCondition>(cond), MIGLIB_IO_WATCH_SFUNC(func), ptr)
+
 #define MIGLIB_CHILD_WATCH_FUNC(cls, func) MIGLIB_FUNC_2(void, GPid, gint, cls, func)
 #define MIGLIB_CHILD_WATCH_ADD(pid, cls, func, ptr) \
     g_child_watch_add(pid, MIGLIB_CHILD_WATCH_FUNC(cls, func), static_cast<cls*>(ptr))
 
-#define MIGLIB_DESTROY_NOTIFY_FUNC(cls, func) MIGLIB_FUNC_0(void, cls, func)
+#define MIGLIB_CHILD_WATCH_SFUNC(func) MIGLIB_SFUNC_2(void, GPid, gint, func)
+#define MIGLIB_S_CHILD_WATCH_ADD(pid, func, ptr) \
+    g_child_watch_add(pid, MIGLIB_CHILD_WATCH_SFUNC(func), ptr)
 
 #define MIGLIB_OBJECT_notify(src, prop, cls, func, ptr) \
     MIGLIB_CONNECT_2(src, "notify::" prop, void, GObject*, GParamSpec*, cls, func, ptr)
@@ -985,7 +1112,9 @@ inline void g_io_channel_set_raw_nonblock(GIOChannel *io, GError **error = NULL)
 MIGLIB_REF_UNREF_PTR(GIOChannel, g_io_channel_ref, g_io_channel_unref)
 MIGLIB_REF_UNREF_PTR(GMainLoop, g_main_loop_ref, g_main_loop_unref)
 MIGLIB_REF_UNREF_PTR(GMainContext, g_main_context_ref, g_main_context_unref)
-MIGLIB_INIT_REF_UNREF_PTR(GVariant, g_variant_ref_sink, g_variant_ref, g_variant_unref)
+
+//Beware! We use g_variant_take_ref, not g_varaint_add_ref because many functions return a new, non-floating GVariant
+MIGLIB_INIT_REF_UNREF_PTR(GVariant, g_variant_take_ref, g_variant_ref, g_variant_unref)
 MIGLIB_UNREF_PTR(GVariantIter, g_variant_iter_free)
 MIGLIB_REF_UNREF_PTR(GVariantBuilder, g_variant_builder_ref, g_variant_builder_unref)
 
