@@ -15,6 +15,7 @@ Copyright (C) 2011 Rodrigo Rivas Costa <rodrigorivascosta@gmail.com>
 #include <string.h>
 #include <stdint.h>
 #include <getopt.h>
+#include <time.h>
 
 #include <regex.h>
 #include <wordexp.h>
@@ -791,6 +792,9 @@ private:
     AutoTimeout m_timeoutSpawned;
     gboolean OnTimeoutSpawned();
 
+    AutoTimeout m_timeoutClock;
+    gboolean OnTimeoutClock();
+
     PangoFontDescriptionPtr m_font, m_fontTitle, m_fontQueue;
 
     void OnDestroy(GtkWidget *w)
@@ -854,6 +858,8 @@ MainWnd::MainWnd(const std::string &lircFile)
     gtk_widget_show(m_wnd);
 
     XResetScreenSaver(gdk_x11_get_default_xdisplay());
+
+    m_timeoutClock.SetTimeout(30000, MIGLIB_TIMEOUT_FUNC(MainWnd, OnTimeoutClock), this);
 
     //if (!ChangeFavorite(1))
     //    ChangePath("/");
@@ -1158,6 +1164,13 @@ gboolean MainWnd::OnTimeoutSpawned()
     return FALSE;
 }
 
+gboolean MainWnd::OnTimeoutClock()
+{
+    gtk_widget_queue_draw(m_wnd);
+    return TRUE;
+}
+
+
 void MainWnd::OnChildWatch(GPid pid, gint status)
 {
     if (g_verbose)
@@ -1204,6 +1217,19 @@ gboolean MainWnd::OnDrawDraw(GtkWidget *w, cairo_t *cr)
     return TRUE;
 }
 #endif
+
+
+static std::string GetClockString()
+{
+    time_t now = time(NULL);
+    tm tmNow;
+    localtime_r(&now, &tmNow);
+    char buf[32];
+    size_t res = strftime(buf, sizeof(buf), "%H:%M", &tmNow);
+    if (res == 0)
+        buf[0] = 0;
+    return buf;
+}
 
 void MainWnd::OnDrawCairo(cairo_t *cr, int width, int height)
 {
@@ -1363,8 +1389,21 @@ void MainWnd::OnDrawCairo(cairo_t *cr, int width, int height)
         cairo_translate(cr, -extraMargin, lineH);
     }
 
-    pango_layout_set_font_description(layout, m_fontTitle);
+
     pango_layout_set_width(layout, (szW + scrollW) * PANGO_SCALE);
+    pango_layout_set_font_description(layout, m_fontQueue);
+
+    const std::string &stime = GetClockString();
+
+    cairo_set_matrix(cr, &matrix);
+    cairo_translate(cr, 0, szH);
+    pango_layout_set_text(layout, stime.data(), stime.size());
+    pango_layout_set_alignment(layout, PANGO_ALIGN_RIGHT);
+    pango_cairo_show_layout(cr, layout);
+    pango_layout_set_alignment(layout, PANGO_ALIGN_LEFT);
+    
+
+    pango_layout_set_font_description(layout, m_fontTitle);
 
     std::string title = m_lister->Title();
     pango_layout_set_text(layout, title.data(), title.size());
